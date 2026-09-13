@@ -8,7 +8,7 @@ This is the driver half of an upcoming "Omdrop" plugin for [Omarchy M](https://g
 
 ## Hardware
 
-Verified on **BCM4387** (`14e4:4433`) in a MacBook Pro 16-inch, M1 Pro, running Asahi Linux. Other Apple Broadcom parts are plausible and untested.
+Developed on **BCM4387** (`14e4:4433`) in a MacBook Pro 16-inch, M1 Pro, running Asahi Linux. Other Apple Broadcom parts are plausible and untested.
 
 This will not work on Intel, MediaTek or Qualcomm Wi-Fi. The approach depends on the firmware already implementing AWDL; the patches configure it rather than providing it. If you want AirDrop on non-Apple hardware, look at [owl](https://github.com/seemoo-lab/owl) and [OpenDrop](https://github.com/seemoo-lab/opendrop), which reimplement AWDL in userspace over monitor mode.
 
@@ -25,20 +25,20 @@ makepkg -si
 Then reboot, or reload the driver when the link can go down for a minute:
 
 ```bash
-sudo modprobe -r brcmfmac_wcc brcmfmac brcmutil && sudo modprobe brcmfmac
+sudo modprobe -r brcmfmac_wcc brcmfmac brcmutil
+sudo modprobe brcmfmac
 ```
 
-## How it fails
+## DKMS Failsafe
 
-Deliberately, toward a working machine. DKMS installs the patched module to `updates/dkms/`, which `depmod` prefers over the in-tree driver **without deleting it**. If a kernel update breaks the out-of-tree build, the stock `brcmfmac` loads and Wi-Fi still works. You lose AWDL, never the network.
+DKMS (Dynamic Kernel Module Support) installs the patched module to `updates/dkms/`, which `depmod` prefers over the in-tree driver **without deleting the original**. If a kernel update breaks the out-of-tree build, the stock `brcmfmac` loads and Wi-Fi still works. You lose AWDL, never the network.
 
-That is the reason this is a DKMS package rather than a hand-built module: a kernel update that silently removes your Wi-Fi is not a thing to leave lying around for someone to debug.
 
 ## The patches
 
 | | |
 |---|---|
-| 0001–0005 | Create and manage the `awdl0` interface the way Apple's driver does |
+| 0001–0005 | Create and manage the `awdl0` interface |
 | 0006 | Firmware RAM snapshot vendor op |
 | 0007 | Translate AWDL data frames at the `awdl0` boundary |
 | 0008 | Tolerate txstatus for a freed flowring (fixes a NULL deref) |
@@ -69,7 +69,7 @@ Derived from the Asahi Linux kernel tree and licensed **GPL-2.0-only**, as the k
 
 ## Trademark
 
-AirDrop is a trademark of Apple Inc. omdrop is an independent project and is not affiliated with or endorsed by Apple.
+AirDrop is a trademark of Apple Inc. Omdrop is an independent project and is not affiliated with or endorsed by Apple.
 
 ## Licence
 
