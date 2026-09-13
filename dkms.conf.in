@@ -1,0 +1,37 @@
+# DKMS template for the patched brcmfmac (firmware-native AWDL on BCM4387).
+# tools/awdl-dkms-install substitutes @VERSION@ with the source-tree hash and
+# stages this next to the sources in /usr/src/brcmfmac-awdl-@VERSION@/.
+#
+# Modules land in /usr/lib/modules/<kver>/updates/dkms/. depmod's search order
+# (/usr/lib/depmod.d/search.conf: "search updates extramodules built-in") puts
+# updates ahead of the in-tree tree, so these win without deleting the stock
+# module -- which is the whole safety story: if a kernel upgrade breaks the
+# out-of-tree build, DKMS installs nothing, the in-tree brcmfmac loads, and the
+# machine still has Wi-Fi. It loses AWDL, not the network.
+#
+# CONFIG_BRCMDBG + -DDEBUG are not optional here: the data-path gate in
+# awdl-discoverable judges the firmware by the per-frame `awdl txstatus` lines
+# the debug build logs. A non-debug build silently removes the only oracle that
+# distinguishes a parked radio from a working one.
+
+PACKAGE_NAME="brcmfmac-awdl"
+PACKAGE_VERSION="@VERSION@"
+AUTOINSTALL="yes"
+
+MAKE[0]="make -C /lib/modules/${kernelver}/build M=${dkms_tree}/${PACKAGE_NAME}/${PACKAGE_VERSION}/build \
+  CONFIG_BRCMFMAC=m CONFIG_BRCMFMAC_PCIE=y CONFIG_BRCMFMAC_USB=y CONFIG_BRCMUTIL=m \
+  CONFIG_BRCMFMAC_PROTO_MSGBUF=y CONFIG_BRCMFMAC_PROTO_BCDC=y CONFIG_BRCMDBG=y \
+  KCFLAGS='-DDEBUG -DCONFIG_BRCMDBG' modules"
+CLEAN="make -C /lib/modules/${kernelver}/build M=${dkms_tree}/${PACKAGE_NAME}/${PACKAGE_VERSION}/build clean"
+
+BUILT_MODULE_NAME[0]="brcmutil"
+BUILT_MODULE_LOCATION[0]="brcmutil"
+DEST_MODULE_LOCATION[0]="/updates/dkms"
+
+BUILT_MODULE_NAME[1]="brcmfmac"
+BUILT_MODULE_LOCATION[1]="brcmfmac"
+DEST_MODULE_LOCATION[1]="/updates/dkms"
+
+BUILT_MODULE_NAME[2]="brcmfmac-wcc"
+BUILT_MODULE_LOCATION[2]="brcmfmac/wcc"
+DEST_MODULE_LOCATION[2]="/updates/dkms"
