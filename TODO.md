@@ -142,18 +142,6 @@ country 99: DFS-UNSET
 
 - How much of the configuration is BCM4387-specific? The iovar names, the template layout and the channel-sequence encoding were all derived on one part.
 
-## Patch 0008 is an independent kernel fix
-
-#### What we know
-
-- The freed-flowring txstatus fix is an ordinary NULL-deref bug fix with no AWDL dependency.
-- It stands on its own and benefits anyone using this driver, not only this project.
-- It has not been submitted upstream and cannot be from here: see Provenance in the README.
-
-#### Open questions
-
-- Is anyone willing to review it and carry it upstream under their own authorship?
-
 ## Power cost is unmeasured
 
 #### What we know
