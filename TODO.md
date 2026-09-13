@@ -7,7 +7,7 @@ The instrumentation patches (0009–0011) are how most of this was found, and th
 Each section separates what was observed from what is still unknown. Where a finding rests on a single trial, it says so.
 
 - [Receive with the Wi-Fi link on 5 GHz](#receive-with-the-wi-fi-link-on-5-ghz)
-- [Send mode does not exist](#send-mode-does-not-exist)
+- [Sending has never completed over AWDL](#sending-has-never-completed-over-awdl)
 - [The regulatory domain is not reapplied to a fresh wiphy](#the-regulatory-domain-is-not-reapplied-to-a-fresh-wiphy)
 - [`awdl0` loses `IFF_UP` across an `awdl=0/1` cycle](#awdl0-loses-iff_up-across-an-awdl01-cycle)
 - [`awdl=0` with a PSF template loaded wedges the firmware](#awdl0-with-a-psf-template-loaded-wedges-the-firmware)
@@ -35,16 +35,23 @@ Each section separates what was observed from what is still unknown. Where a fin
 - Is the collision what matters? Every 5 GHz trial used an infrastructure channel identical to the AWDL peer channel, because the only AP available offered ch157. "5 GHz infra" and "5 GHz infra on the same channel" have never been separated.
 - Is this the same fault as the regulatory-domain bug below, or a second one?
 
-## Send mode does not exist
+## Sending has never completed over AWDL
 
 #### What we know
 
-- Receive only. Nothing here sends.
-- Most of what is missing is userspace, not driver.
+- No send to an Apple device has ever completed. Receiving is the only direction proven end to end.
+- The sender itself is not the problem. Run against a local receiver over loopback it completes the whole exchange — `/Ask` answered, `/Upload` accepted, file stored — so the HTTP client, the TLS setup and the payload encoding are all exercised and working.
+- Over AWDL the failure is at the transport hop, before the application layer is reached. In the best attempt the client opened `/Discover` and put **nine TCP SYNs** on the wire to the peer's AirDrop port over 20 s and received **zero SYN-ACKs** — every packet a retransmission of the same `Seq=0`. Other runs got SYNs to arrive at the peer and still saw no reply.
+- `/Ask` has therefore never reached a peer. Everything above the TCP handshake is untested on air, in this direction.
+- Discovery in this direction does work: a peer publishes its `_airdrop._tcp` service in its MIFs about 1.1 s after our first action frame, so the peer sees us and answers at the AWDL layer while refusing the TCP connection.
+- Most of the remaining work looks like userspace rather than driver, with the possible exception of action-frame pacing.
 
 #### Open questions
 
-- How does action-frame TX pace against an in-flight transfer? That path has only been exercised as a receiver, where our action frames compete with inbound data rather than outbound.
+- Why does the peer not answer the SYN? It has clearly registered us — it publishes its AirDrop service in response to our presence — so the connection is being dropped somewhere between the peer's AWDL stack and its listening socket.
+- Is the loss on our transmit side or the peer's receive side? Frames leave us and the peer reacts to our presence, but nobody has captured whether the SYN itself is reaching the peer's stack in the runs where no reply comes.
+- Is a peer's unicast reply subject to the same peer-cache requirement that receiving turned out to need? A missing peer-cache entry silently discards unicast before it reaches the air, and that fault has already been found once in the receive direction.
+- How does action-frame TX pace against an in-flight transfer? That path has only ever been exercised as a receiver, where our action frames compete with inbound data rather than outbound.
 
 ## The regulatory domain is not reapplied to a fresh wiphy
 
