@@ -14,7 +14,6 @@ Each section separates what was observed from what is still unknown. Where a fin
 - [The instrumentation logs unconditionally](#the-instrumentation-logs-unconditionally)
 - [The kernel tag is pinned](#the-kernel-tag-is-pinned)
 - [Only BCM4387 has been tested](#only-bcm4387-has-been-tested)
-- [Patch 0008 is an independent kernel fix](#patch-0008-is-an-independent-kernel-fix)
 - [Power cost is unmeasured](#power-cost-is-unmeasured)
 
 ## Receive with the Wi-Fi link on 5 GHz
