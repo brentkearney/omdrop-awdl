@@ -21,11 +21,13 @@ Receive is proven with the infrastructure link on 2.4 GHz.
 
 Note what that does *not* mean: the AWDL dwell is already mostly 5 GHz in the working configuration — 12 of 16 slots on channel 157. What is unsolved is running the STA on 5 GHz **at the same time**, not 5 GHz AWDL.
 
-With `wld0` associated on 5 GHz ch157 and every other condition individually verified — `awdl0` up with a link-local, receiver listening, action frames flowing both ways, the peer at −41 dBm with `dist=0`, our advertised channel sequence read back from the firmware — a sender still never discovers us. Reproducible, and unexplained.
+With `wld0` associated on 5 GHz ch157 and every other condition individually verified — `awdl0` up with a link-local, receiver listening, action frames flowing both ways, the peer at −41 dBm with `dist=0`, our advertised channel sequence read back from the firmware — a sender still never discovers us. Unexplained.
+
+Be careful how much weight you put on that. The configuration was attempted four times, but three of those ran while `awdl0` had been left administratively down by an `awdl=0/1` cycle (see below), so they measured a dead netdev rather than the band — one of them even reported the firmware as parked, which it was not. Exactly **one** trial is valid: the one taken after that bug was fixed. The failure is real and carefully observed, but it is a single clean observation, not an established pattern.
 
 Cheapest next steps, in order:
 
-1. Repeat it once. A single negative is thin.
+1. Repeat the valid trial. One clean negative is thin evidence for something this structural, and the three void attempts do not corroborate it.
 2. Compare the advertised channel sequence against what the firmware actually dwells on while the STA holds a 5 GHz channel. The STA may be pinning the radio and starving the AWDL slots we advertise.
 3. Try 5 GHz infrastructure on a channel that does **not** collide with the AWDL peer channel. This needs an AP that offers one.
 
