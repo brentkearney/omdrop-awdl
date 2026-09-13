@@ -6,17 +6,17 @@ The instrumentation patches (0009–0011) are how most of this was found, and th
 
 Each section separates what was observed from what is still unknown. Where a finding rests on a single trial, it says so.
 
-- [Receive with the Wi-Fi link on 5 GHz](#receive-with-the-wi-fi-link-on-5-ghz)
-- [Sending has never completed over AWDL](#sending-has-never-completed-over-awdl)
-- [The regulatory domain is not reapplied to a fresh wiphy](#the-regulatory-domain-is-not-reapplied-to-a-fresh-wiphy)
-- [`awdl0` loses `IFF_UP` across an `awdl=0/1` cycle](#awdl0-loses-iff_up-across-an-awdl01-cycle)
-- [`awdl=0` with a PSF template loaded wedges the firmware](#awdl0-with-a-psf-template-loaded-wedges-the-firmware)
-- [The instrumentation logs unconditionally](#the-instrumentation-logs-unconditionally)
-- [The kernel tag is pinned](#the-kernel-tag-is-pinned)
-- [Only BCM4387 has been tested](#only-bcm4387-has-been-tested)
-- [Power cost is unmeasured](#power-cost-is-unmeasured)
+1. [Receive with the Wi-Fi link on 5 GHz](#1-receive-with-the-wi-fi-link-on-5-ghz)
+2. [Sending has never completed over AWDL](#2-sending-has-never-completed-over-awdl)
+3. [The regulatory domain is not reapplied to a fresh wiphy](#3-the-regulatory-domain-is-not-reapplied-to-a-fresh-wiphy)
+4. [`awdl0` loses `IFF_UP` across an `awdl=0/1` cycle](#4-awdl0-loses-iff_up-across-an-awdl01-cycle)
+5. [`awdl=0` with a PSF template loaded wedges the firmware](#5-awdl0-with-a-psf-template-loaded-wedges-the-firmware)
+6. [The instrumentation logs unconditionally](#6-the-instrumentation-logs-unconditionally)
+7. [The kernel tag is pinned](#7-the-kernel-tag-is-pinned)
+8. [Only BCM4387 has been tested](#8-only-bcm4387-has-been-tested)
+9. [Power cost is unmeasured](#9-power-cost-is-unmeasured)
 
-## Receive with the Wi-Fi link on 5 GHz
+## 1. Receive with the Wi-Fi link on 5 GHz
 
 #### What we know
 
@@ -25,34 +25,42 @@ Each section separates what was observed from what is still unknown. Where a fin
 - With `wld0` associated on 5 GHz ch157 and every other condition individually verified — `awdl0` up with a link-local, receiver listening, action frames moving both ways, the peer at −41 dBm with `dist=0`, and our advertised channel sequence read back from the firmware — a sender never discovered us.
 - That failure rests on **one** valid trial. The configuration was attempted four times, but three attempts ran while `awdl0` had been left administratively down by an `awdl=0/1` cycle (below), so they measured a dead netdev rather than the band. One of those three reported the firmware as parked while it was transmitting normally.
 - A firmer result, from a deliberate A/B: moving the dwell to 2.4-dominant — thirteen of sixteen slots on channel 6 — broke discovery outright, even though that sequence still overlapped the peer on both 149 slots and on the shared channel 6 master slot. Overlap on secondary slots plus the master availability window was not sufficient; the peer's primary social channel had to be in our dwell.
-- Apple keeps the master availability window on channel 6 even with a 5 GHz infrastructure link, and so do we.
+- A 2.4-dominant dwell also degrades synchronization, which gives that result a mechanism: `lostmaster` went from 0.13/s to 0.85/s, because the master's own sync frames ride the 5 GHz slots. Dwelling on 6 costs the sync we need to stay in the peer's tree.
+- **The infrastructure band is a sync-quality factor, not the discovery gate.** With the station on 5 GHz ch44 and the AWDL master window on 6, pinning the station to 2.4 GHz roughly halved `lostmaster` (63 → 35 per 30 s) and changed nothing else measurable. It makes the schedule easier to hold; it is not what decides whether a peer finds us.
+- **The channel-sequence encoding is load-bearing for 5 GHz.** `awdl_chan_seq` encoding 0 — one channel byte per slot — is accepted by the firmware, and the firmware then schedules **no 5 GHz TX at all** from it. Apple advertises encodings 1 and 3; we use 3 (`{chan, opclass}`, opclass 81 for 2.4 GHz and 128 for 5 GHz). A 5 GHz sequence written in encoding 0 is a silent no-op that reads back correctly.
+- **Zero slots are load-bearing too.** A full 16-of-16 sequence drops an idle Mac's replies to zero after about three minutes, and filling every slot with the master's channel destroyed reception outright. The firmware sends our multicast only inside our own non-zero slots and drops — not queues — whatever arrives outside them: about 25% transmitted with a sparse 4-of-16 sequence, 55% with the Mac's dense shape, 99.9% with a full one.
+- **A measurement trap that has voided conclusions before:** `awdl0` transmits at `chanspec 0xe09b` = 149/80 MHz, and the Macs' 5 GHz slots are `44++`/80 MHz. A 20 MHz monitor capture can never see 5 GHz AWDL data from any device, so several readings of "no 5 GHz data on air" were the sniffer's bandwidth rather than the air.
+- **The firmware peer table can be read back**, which turns some of this from inference into measurement: `awdl_peer_op` answers a GET with its peer entries, each carrying that peer's own channel sequence, and those rows have matched a Mac's own `wdutil` report independently. (`awdl_peer_table`, `awdl_peer_stats` and `awdl_peers` are unsupported on this firmware.)
 
 #### Open questions
 
 - Does the single 5 GHz failure reproduce? Three void attempts corroborate nothing.
-- Does the firmware actually dwell on the sequence we advertise while the STA holds a 5 GHz channel? If the STA pins the radio, the advertised slots are a fiction and a peer scheduling into them finds nobody.
+- Does the firmware actually dwell on the sequence we advertise while the STA holds a 5 GHz channel? If the STA pins the radio, the advertised slots are a fiction and a peer scheduling into them finds nobody. The peer-table readback shows what we know of *others*' schedules, not what our own radio does.
 - Is the collision what matters? Every 5 GHz trial used an infrastructure channel identical to the AWDL peer channel, because the only AP available offered ch157. "5 GHz infra" and "5 GHz infra on the same channel" have never been separated.
-- Is this the same fault as the regulatory-domain bug below, or a second one?
+- Is this the same fault as the regulatory-domain bug below? Firmware regulatory has been retired as a 5 GHz *transmit* gate, but the wiphy's world domain after a reload has not been ruled out as a cause of this.
 
-## Sending has never completed over AWDL
+## 2. Sending has never completed over AWDL
 
 #### What we know
 
-- No send to an Apple device has ever completed. Receiving is the only direction proven end to end.
+- No file has ever reached an Apple device from here. Receiving is the only direction proven end to end. More of the send path works than that sentence suggests, and the phone and the Mac fail in different places.
+- **`/Discover` has completed against an iPhone.** 200 with the phone's own name in `ReceiverComputerName`, in 1.13 s, and again at 1.2 s and 12.8 s on later attempts. The endpoint was resolved with no mDNS at all — read out of the phone's MIF Service Response TLVs through the driver's action-frame events, EUI-64 link-local, SRV port 8770 — and TLS was accepted. Resolve, TCP, TLS and the first HTTPS exchange all work in this direction.
+- **`/Ask` reaches the phone.** It has been sent and delivered; iOS holds the HTTP response until the user taps, and it went unanswered at 120 s and 300 s with nobody at the phone. A later session found the phone displays no prompt for our `/Ask` in any shape tried, including one rebuilt from a Mac's captured Ask body. What is unproven there is sender identity, not transport.
+- **Contacts Only rejects us at TLS.** The phone answers our self-signed sender certificate with `certificate unknown` and its advert then carries an empty TXT. Everyone mode accepts the same certificate.
+- **A Mac is a different problem.** Every zero-SYN-ACK run was against a Mac at port 8770 — in the best of them nine SYNs over 20 s, each a retransmission of the same `Seq=0`. A Mac also publishes no `_airdrop._tcp` advert until something wakes it over BLE, and a Mac sitting with its Finder AirDrop window open publishes none either, so there is often nothing to connect to.
+- **Our unicast transmit needs a firmware peer entry.** Without `awdl_peer_op ADD` for the destination every frame completes `tx_status 0x0003` = `FW_TOSSED`, discarded before any air attempt; with the entry the fates become `0x0000`, acked by the receiver. This was proven in the receive direction and is the first thing to check in any send failure.
+- **Timing matters.** A Mac that has just seen us tear down and return with the same MAC takes about 40 s to talk to us again, so a send fired at T0 races it — fire at roughly T0+30. After a failed send, one Mac's frames *to* us paused for 12 minutes while its reception of us stayed alive (n=1).
 - The sender itself is not the problem. Run against a local receiver over loopback it completes the whole exchange — `/Ask` answered, `/Upload` accepted, file stored — so the HTTP client, the TLS setup and the payload encoding are all exercised and working.
-- Over AWDL the failure is at the transport hop, before the application layer is reached. In the best attempt the client opened `/Discover` and put **nine TCP SYNs** on the wire to the peer's AirDrop port over 20 s and received **zero SYN-ACKs** — every packet a retransmission of the same `Seq=0`. Other runs got SYNs to arrive at the peer and still saw no reply.
-- `/Ask` has therefore never reached a peer. Everything above the TCP handshake is untested on air, in this direction.
-- Discovery in this direction does work: a peer publishes its `_airdrop._tcp` service in its MIFs about 1.1 s after our first action frame, so the peer sees us and answers at the AWDL layer while refusing the TCP connection.
 - Most of the remaining work looks like userspace rather than driver, with the possible exception of action-frame pacing.
 
 #### Open questions
 
-- Why does the peer not answer the SYN? It has clearly registered us — it publishes its AirDrop service in response to our presence — so the connection is being dropped somewhere between the peer's AWDL stack and its listening socket.
-- Is the loss on our transmit side or the peer's receive side? Frames leave us and the peer reacts to our presence, but nobody has captured whether the SYN itself is reaching the peer's stack in the runs where no reply comes.
-- Is a peer's unicast reply subject to the same peer-cache requirement that receiving turned out to need? A missing peer-cache entry silently discards unicast before it reaches the air, and that fault has already been found once in the receive direction.
+- What identity does an iPhone need before it will show the prompt? Everything beneath `/Ask` works and the phone displays nothing, which points at the sender certificate and the Apple ID material rather than the radio.
+- Can a Mac be made to publish its `_airdrop._tcp` advert without a BLE wake? Until it does, there is no endpoint to open a socket to.
+- In the Mac runs that did have an endpoint, why is the SYN unanswered — is our `awdl_peer_op` entry for that Mac correct? We have only recently learned the entry can be read back, and it has never been checked in a send attempt.
 - How does action-frame TX pace against an in-flight transfer? That path has only ever been exercised as a receiver, where our action frames compete with inbound data rather than outbound.
 
-## The regulatory domain is not reapplied to a fresh wiphy
+## 3. The regulatory domain is not reapplied to a fresh wiphy
 
 #### What we know
 
@@ -70,6 +78,7 @@ country 99: DFS-UNSET
 
 - In the world domain 5 GHz cannot initiate radiation until a beacon has been heard. NetworkManager's autoconnect times out before that happens, so the link needs a manual Wi-Fi cycle after every reload — four times in a single session.
 - On 2.4 GHz the world domain still permits active scanning, and the link returns unattended.
+- Firmware regulatory has been investigated as a 5 GHz *transmit* gate and retired as a dead end. This entry is about the wiphy's domain and the association it blocks, which is a different thing and is unresolved.
 
 #### Open questions
 
@@ -77,7 +86,7 @@ country 99: DFS-UNSET
 - Is the world domain transient and merely slower than NetworkManager's patience, or does it persist until something external triggers it?
 - Does this explain the 5 GHz receive failure above? Both involve 5 GHz being unusable after a reload, and neither has been ruled out as a symptom of the other.
 
-## `awdl0` loses `IFF_UP` across an `awdl=0/1` cycle
+## 4. `awdl0` loses `IFF_UP` across an `awdl=0/1` cycle
 
 #### What we know
 
@@ -91,7 +100,7 @@ country 99: DFS-UNSET
 - Should the driver preserve interface state across an `awdl` toggle, or is dropping the netdev the intended contract with userspace expected to re-raise it?
 - Is the drop the firmware's doing or the driver's?
 
-## `awdl=0` with a PSF template loaded wedges the firmware
+## 5. `awdl=0` with a PSF template loaded wedges the firmware
 
 #### What we know
 
@@ -106,7 +115,7 @@ country 99: DFS-UNSET
 - Is there an iovar that resets the AWDL data path without unloading the module? That would remove the last unrecoverable state in the driver.
 - Is there any way to make `awdl_payload` report "no template" again short of a reload?
 
-## The instrumentation logs unconditionally
+## 6. The instrumentation logs unconditionally
 
 #### What we know
 
@@ -118,7 +127,7 @@ country 99: DFS-UNSET
 
 - Is there a form — `dyndbg`, a module parameter, a tracepoint — that keeps the oracle available on demand without the steady-state volume?
 
-## The kernel tag is pinned
+## 7. The kernel tag is pinned
 
 #### What we know
 
@@ -129,7 +138,7 @@ country 99: DFS-UNSET
 
 - What breaks on the next tag? A rebase is only useful alongside a retest.
 
-## Only BCM4387 has been tested
+## 8. Only BCM4387 has been tested
 
 #### What we know
 
@@ -141,7 +150,7 @@ country 99: DFS-UNSET
 
 - How much of the configuration is BCM4387-specific? The iovar names, the template layout and the channel-sequence encoding were all derived on one part.
 
-## Power cost is unmeasured
+## 9. Power cost is unmeasured
 
 #### What we know
 
