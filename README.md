@@ -67,6 +67,10 @@ They were not submitted to Asahi Linux, whose [generative AI policy](https://asa
 
 Derived from the Asahi Linux kernel tree and licensed **GPL-2.0-only**, as the kernel is. Authorship and `Signed-off-by` lines are preserved in each patch.
 
+## Trademark
+
+AirDrop is a trademark of Apple Inc. omdrop is an independent project and is not affiliated with or endorsed by Apple.
+
 ## Licence
 
 GPL-2.0-only. See [LICENSE](LICENSE).
