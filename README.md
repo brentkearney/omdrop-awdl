@@ -7,8 +7,7 @@ AWDL — Apple Wireless Direct Link — is the link layer AirDrop and AirPlay ru
 over. These patches create an `awdl0` interface from the firmware's own AWDL
 implementation, rather than reimplementing the protocol in userspace.
 
-This is the driver half of [omdrop](https://github.com/brentkearney/omdrop),
-which is the userspace and desktop half. You need this to make that useful.
+This is the driver half of an upcoming "Omdrop" plugin for [Omarchy M](https://github.com/omacom/omarchy-mac), the Omarchy Linux distribution for Macs.
 
 ## Hardware
 
