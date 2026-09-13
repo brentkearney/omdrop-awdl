@@ -6,6 +6,16 @@ AWDL — Apple Wireless Direct Link — is the link layer AirDrop and AirPlay ru
 
 This is the driver half of an upcoming "Omdrop" plugin for [Omarchy M](https://github.com/omacom/omarchy-mac), the Omarchy Linux distribution for Macs.
 
+- [Hardware](#hardware)
+- [Install](#install)
+- [DKMS Failsafe](#dkms-failsafe)
+- [The patches](#the-patches)
+- [Maintenance](#maintenance)
+  - [Contributions & WIP](#contributions--wip)
+- [Provenance](#provenance)
+- [Trademark](#trademark)
+- [Licence](#licence)
+
 ## Hardware
 
 Developed on **BCM4387** (`14e4:4433`) in a MacBook Pro 16-inch, M1 Pro, running Asahi Linux. Other Apple Broadcom parts are plausible and untested.
@@ -33,7 +43,6 @@ sudo modprobe brcmfmac
 
 DKMS (Dynamic Kernel Module Support) installs the patched module to `updates/dkms/`, which `depmod` prefers over the in-tree driver **without deleting the original**. If a kernel update breaks the out-of-tree build, the stock `brcmfmac` loads and Wi-Fi still works. You lose AWDL, never the network.
 
-
 ## The patches
 
 | | |
@@ -44,16 +53,13 @@ DKMS (Dynamic Kernel Module Support) installs the patched module to `updates/dkm
 | 0008 | Tolerate txstatus for a freed flowring (fixes a NULL deref) |
 | 0009–0011 | Action-frame instrumentation on the AWDL interface |
 
-**The instrumentation patches matter.** 0009–0011 log and dump AWDL action
-frames — the PSF and MIF frames discovery actually runs on. Almost nothing about this protocol is documented, and these are how you find out what the firmware is really doing. If you are extending this work, start there.
+**The instrumentation patches matter.** 0009–0011 log and dump AWDL action frames — the PSF and MIF frames discovery actually runs on. Almost nothing about this protocol is documented, and these are how you find out what the firmware is really doing. If you are extending this work, start there.
 
 Patch 0008 is an ordinary kernel bug fix with no AWDL dependency, and stands on its own.
 
 ## Maintenance
 
-The patches are against **`asahi-7.1.13-2`**, matching `linux-asahi
-7.1.13.asahi2-1`, and the `PKGBUILD` pins that tag. The pin is deliberate: a
-newer tree may need them rebased, and building against whatever happens to be current would turn a rebase conflict into a runtime surprise.
+The patches are against **`asahi-7.1.13-2`**, matching `linux-asahi 7.1.13.asahi2-1`, and the `PKGBUILD` pins that tag. The pin is deliberate: a newer tree may need them rebased, and building against whatever happens to be current would turn a rebase conflict into a runtime surprise.
 
 They touch twelve files, all under `drivers/net/wireless/broadcom/brcm80211/brcmfmac/`. Nothing outside that directory.
 
