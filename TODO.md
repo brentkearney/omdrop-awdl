@@ -1,11 +1,8 @@
-# TODO — contributions welcome
+# TODO
 
-Known gaps in `omdrop-awdl`, with what has already been measured about each.
-Where a claim came from an experiment, the observation is given so you can
-disagree with it rather than repeat it.
+Known gaps in `omdrop-awdl`, with what has already been tested, with supporting information.
 
-The instrumentation patches (0009–0011) are how most of this was found. If you
-are picking something up, start by reading their output.
+The instrumentation patches (0009–0011) are how most of this was found. If you are picking something up, start by reading their output.
 
 ## Stable receive with the Wi-Fi link on 5 GHz
 
