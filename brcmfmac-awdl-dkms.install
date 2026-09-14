@@ -7,6 +7,15 @@ post_install() {
 
       modprobe -r brcmfmac_wcc brcmfmac brcmutil && modprobe brcmfmac
 
+  Then enable the boot-time interface setup, which creates awdl0 and configures
+  it without enabling AWDL or advertising anything:
+
+      systemctl enable --now awdl0.service
+
+  Discoverability stays off until something asks for it:
+
+      pkexec /usr/lib/omdrop/omdrop-discoverable start 600
+
   The debug build is not optional: the data-path gate counts per-frame
   `awdl txstatus` lines to tell a parked radio from a working one, so a
   non-debug build removes the only oracle there is.
