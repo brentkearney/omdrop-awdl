@@ -1,0 +1,818 @@
+#!/usr/bin/env bash
+# Make this machine discoverable to AirDrop "Everyone" for a bounded window.
+#
+#   omdrop-discoverable start <seconds>    become discoverable for N seconds
+#   omdrop-discoverable stop               stop advertising, tear down
+#   omdrop-discoverable status [--json]    {"visible":bool,"remaining":int|null,"reason":str}
+#
+# This owns everything BELOW the receiver: the data-path gate, the AWDL service
+# identity, the action-frame announcer, the mDNS responder, peer registration,
+# and (opt-in) the BLE Continuity advert. It never touches port 8771 and never
+# signals the receiver -- that is a separate, longer-lived user service, and
+# killing it from here once left a live window with nothing listening.
+#
+# ROOT: required. Every step is an nl80211 vendor dcmd on awdl0 (awdl=0/1,
+# awdl_payload, awdl_afs_pload, awdl_peer_op) or AF_PACKET on awdl0; as a normal
+# user they all return EPERM. Invoke with pkexec, never sudo (machine rule).
+#
+# NEVER loads or reloads the driver: that costs ~7 minutes of Wi-Fi and is not
+# something a button may do behind a user's back. It WILL rebuild a missing
+# awdl0 when the driver is loaded (awdl-up, ~2 s, no reload) -- a Wi-Fi off/on
+# destroys the vif, and refusing to recreate it stranded the user with a
+# message blaming the driver. Exits 4 only when the interface cannot be had.
+#
+# Exit codes (the contract the omdrop CLI and panel call against):
+#   0  visible (start), stopped (stop), always (status)
+#   2  usage error, or not root
+#   3  data path parked -- the firmware would not transmit; retryable
+#   4  awdl0 absent or down; driver not loaded
+#   5  already discoverable; the window was extended instead of stacking
+set -uo pipefail
+
+# Helpers live beside this script: /usr/lib/omdrop when packaged. Resolved from
+# our own realpath rather than the working directory, because pkexec runs us
+# with the caller's cwd -- from the panel that is wherever the shell was
+# started, and a helper looked up relatively there is simply not found.
+LIB="$(cd "$(dirname "$(readlink -f "$0")")" && pwd)"
+# Per-machine tunables and the diagnostic switches. Absent is the normal case:
+# every knob below has a working default, and the directory only exists on a
+# machine someone has tuned.
+CONF=${OMDROP_CONF:-/etc/omdrop}
+export OMDROP_CONF="$CONF"
+IF=awdl0
+RUN=/run/awdl-discoverable
+LOG=$RUN/log
+# How many awdl=0/1 cycles to spend fighting a parked data path. Each costs
+# ~40 s. The park is ~50% per enable and streaky, so 3 is the point where the
+# expected failure rate (~1 in 8) stops improving faster than the user's
+# patience degrades.
+ENABLES=${AWDL_GATE_ENABLES:-3}
+# Announcer burst: 40 frames per interval is what reaches Apple devices through
+# our 4 active slots of 16 (~25% of submitted frames make the air).
+ADV_COUNT=40
+ADV_INTERVAL=6
+# Receiver capability flags in the AirDrop advert and the mDNS TXT record.
+# 0x88 is OpenDrop's set (SUPPORTS_MIXED_TYPES 0x08 | SUPPORTS_DISCOVER_MAYBE
+# 0x80) and it omits SUPPORTS_URL (0x01) -- which is the standing suspect for
+# iOS 26 accepting a `TransferType: links` Ask and then never uploading the
+# webloc (five sends, 2026-09-12). macOS's own default is 0x3fb, URL bit set.
+# 0x89 = 0x88 + SUPPORTS_URL: one bit changed, and MIXED_TYPES stays set so
+# sharingd's removeInvalidNodes: still considers us a valid node.
+ADV_FLAGS=${AWDL_ADV_FLAGS:-137}
+
+# stderr always; the file only when /run/awdl-discoverable exists and is ours
+# (status runs as the user, and a noisy tee failure is not a status result).
+log(){ local line; line="$(date -u +%H:%M:%SZ) $*"
+       printf '%s\n' "$line" >&2
+       [[ -d $RUN && -w $RUN ]] && printf '%s\n' "$line" >> "$LOG" 2>/dev/null
+       return 0; }
+die(){ local rc=$1; shift; log "$*"; exit "$rc"; }
+now(){ date +%s; }
+
+need_root(){ [[ $EUID -eq 0 ]] || die 2 "needs root: pkexec $0 $*"; }
+
+# --- firmware helpers -------------------------------------------------------
+fwerr(){ dmesg | grep -o "firmware error -\?[0-9]*" | tail -1 | grep -o '\-\?[0-9]*$'; }
+# On failure the firmware's reason is the whole diagnosis, and it used to go to
+# /dev/null: 05:3xZ an awdl_payload SET was rejected on every window of the
+# night and nothing said why. Keep stdout for the caller to log.
+iovar_set(){ local out rc; dmesg -C
+             out=$(timeout 8 python3 "$LIB/brcm_iovar.py" -i "$IF" set "$1" "$2" 2>&1); rc=$?
+             (( rc == 0 )) || log "iovar_set $1: rc=$rc ${out##*$'\n'}"
+             return $rc; }
+# brcm_iovar.py writes --raw only when the GET succeeds, so a leftover file
+# from an earlier call reads as a live value: after a driver reload the
+# template was gone, `awdl_payload` GET returned EROFS (AWDL disabled), and the
+# stale 512-byte file from the previous window made the gate refuse the
+# retoggle for a template that no longer existed. Delete first, then measure.
+iovar_get_len(){ rm -f "$3"
+                 timeout 8 python3 "$LIB/brcm_iovar.py" -i "$IF" get "$1" -l "$2" --raw "$3" >/dev/null 2>&1
+                 stat -c %s "$3" 2>/dev/null || echo 0; }
+le32(){ python3 -c "import struct,sys;print(struct.pack('<I',int(sys.argv[1])).hex())" "$1"; }
+
+awdl0_ready(){
+  ip link show "$IF" >/dev/null 2>&1 || return 1
+  ip link show "$IF" | grep -q 'state UP\|UP,' || ip link set "$IF" up 2>/dev/null
+  ip link show "$IF" >/dev/null 2>&1
+}
+
+# "Is brcmfmac there at all", which is a different question from "is awdl0
+# there". A Wi-Fi off/on removes the vif and leaves the module loaded, and the
+# two used to be conflated into one wrong message.
+driver_loaded(){ [[ -d /sys/module/brcmfmac ]]; }
+
+# The only honest test of the data path: submit a burst and count the per-frame
+# completions the firmware logs. A parked firmware parses PSFs, fills its peer
+# table and elects normally while transmitting nothing, so peer state, opmode
+# and outstanding_tx all look healthy in both cases. >=15 of 20 = live.
+probe_completions(){
+  dmesg -C
+  python3 "$LIB/awdl-airdrop-adv.py" --iface "$IF" --count 20 --interval 0.02 --seq 9000 >/dev/null 2>&1 || return 1
+  sleep 3
+  dmesg | awk '/awdl txstatus/' | grep -c 'tx_status=0x' || true
+}
+
+# rx_ok: does the DATA path deliver? The completions probe only proves TRANSMIT.
+# 00:23-00:30Z showed the other half-failure: 20/20 completions, action frames
+# arriving continuously (peer table and election healthy), and ZERO data frames
+# received for seven minutes -- so peers' mDNS queries never reached the
+# responder and no SYN could ever arrive. A firmware in that state passes a
+# TX-only gate and cannot receive a file.
+#
+# Peers are audible (we hold their action frames), so their multicast mDNS
+# chatter should land within seconds. Silence here is the receive path parked.
+rx_ok(){
+  local before after
+  before=$(cat "/sys/class/net/$IF/statistics/rx_packets")
+  sleep "${1:-15}"
+  after=$(cat "/sys/class/net/$IF/statistics/rx_packets")
+  [[ $((after - before)) -gt 0 ]]
+}
+
+# Returns 0 when the path TRANSMITS; the receive side is recovered on a
+# best-effort basis and then reported, never used to refuse the button.
+#
+# Both halves park independently. 01:52Z proved that refusing on a silent
+# receive sample is wrong (a quiet room is not a parked radio, and the gate
+# burned its whole budget on a radio transmitting 20/20). 02:24-02:32Z proved
+# that ignoring it is also wrong: two windows opened on a firmware that had not
+# delivered a data frame from ANY peer in nine minutes, and neither the peer
+# Mac nor the phone could see us. So: when transmit works but nothing arrives, spend
+# the enable budget trying for a firmware that hears, and if none of them does,
+# open the window anyway and say the receive side is unproven.
+#
+# Retoggles awdl=0/1 only while NO template is loaded: awdl=0 with awdl_payload
+# set hung the firmware (023513Z).
+# rx_proven: the gate opens on TRANSMIT, but "we can be discovered" is a
+# different claim from "we are advertising". Every exit records which one we
+# earned, so status can tell a panel the truth instead of flattening both into
+# ok (observed: window opened with receive UNPROVEN and status
+# still said ok, so the panel claimed "Visible to everyone" for a radio
+# nobody had answered).
+#
+# Note what rx_ok can and cannot see: it counts DATA frames. Action frames --
+# the peer's PSFs and MIFs, which is what discovery actually runs on -- never
+# increment it, and no data frame exists until a sender has already found us
+# and connected. So "receive silent" in an idle room is weak evidence, not
+# proof of deafness: check `diag` afrx and the peer table before believing it.
+rx_mark(){ printf '%s' "$1" > "$RUN/rx_proven"; }
+gate(){
+  local n try tx_ok=0
+  rx_mark 0
+  n=$(probe_completions) || return 2
+  log "gate: probe 20 frames -> $n completions"
+  if [[ ${n:-0} -ge 15 ]]; then
+    tx_ok=1
+    rx_ok && { log "gate: receive confirmed"; rx_mark 1; return 0; }
+    log "gate: transmitting but no data frames in 15 s -- trying to recover the receive path"
+  fi
+  local plen; plen=$(iovar_get_len awdl_payload 512 "$RUN/payload.bin")
+  if [[ ${plen:-0} -gt 0 ]]; then
+    log "gate: template loaded (awdl_payload len $plen); no awdl=0 retoggle (023513Z)"
+    [[ $tx_ok -eq 1 ]] && { log "gate: opening on a transmitting radio, receive UNPROVEN"; return 0; }
+    return 1
+  fi
+  for try in $(seq 1 "$ENABLES"); do
+    iovar_set awdl "$(le32 0)"; sleep 2
+    iovar_set awdl "$(le32 1)"; sleep 3
+    ip link set "$IF" promisc on 2>/dev/null; ip link set "$IF" allmulticast on 2>/dev/null
+    for wait in 7 30; do
+      sleep "$wait"
+      n=$(probe_completions) || return 2
+      log "gate: enable $try, probe 20 frames -> $n completions"
+      if [[ ${n:-0} -ge 15 ]]; then
+        tx_ok=1
+        rx_ok && { log "gate: receive confirmed on enable $try"; rx_mark 1; return 0; }
+        log "gate: enable $try transmits, receive still silent"
+        break                       # this enable is a dud for RX; take another
+      fi
+    done
+  done
+  [[ $tx_ok -eq 1 ]] && { log "gate: opening after $ENABLES enables with the receive side UNPROVEN"; return 0; }
+  return 1
+}
+
+# self_metric: the election metric this machine runs, and therefore the one our
+# PSFs must advertise. $CONF/election-metric overrides the default of 100.
+self_metric(){ local em; em=$(head -1 "$CONF/election-metric" 2>/dev/null | tr -dc '0-9'); printf '%s' "${em:-100}"; }
+
+# election_state: the firmware's own view, as "<master> <sync> <depth> <master
+# metric> <self metric>". mkpsf takes these on its command line.
+#
+# The self metric was hardcoded to 100 here, and that is a bug with teeth: with
+# awdl_election_metric=600 in the firmware we refuse to adopt anyone, while our
+# template still told the room we were worth 100 -- so nobody adopted us
+# either. Measured exactly that dead end: a peer advertising a top master at
+# distance 0 and metric 510, us root of our own tree, two disjoint trees,
+# action frames crossing and no data. Advertise what we actually run.
+election_state(){
+  local etree=$RUN/etree.bin opmode=$RUN/opmode.bin
+  iovar_get_len awdl_election_tree 42 "$etree" >/dev/null
+  iovar_get_len awdl_opmode 12 "$opmode" >/dev/null
+  python3 - "$etree" "$opmode" "$(cat /sys/class/net/$IF/address)" "$(self_metric)" "$LIB" <<'PYX'
+import os, re, subprocess, sys
+etree, opmode, us, mine, lib = sys.argv[1:6]
+txt = subprocess.run([sys.executable, os.path.join(lib, 'awdl-election.py'), etree],
+                     capture_output=True, text=True).stdout
+top = re.search(r'top_master\s*=\s*([0-9a-f:]{17})\s+metric\s+(\d+)', txt)
+dep = re.search(r'tree_depth\s*=\s*(\d+)', txt)
+try:
+    b = open(opmode, 'rb').read()
+    sync = ':'.join(f'{x:02x}' for x in b[4:10]) if len(b) >= 10 else us
+except OSError:
+    sync = us
+master, mm = (top.group(1), top.group(2)) if top else (us, mine)
+# Rooted on ourselves: the master metric IS our metric, not whatever the tree
+# readback happened to hold.
+if master == us:
+    mm = mine
+depth = dep.group(1) if dep else '0'
+print(master, sync, depth, mm, mine)
+PYX
+}
+
+# write_template <state...>: the PSF template for one election state.
+#
+# $CONF/no-template suppresses the write. It exists because two runs
+# measured reception dying at the exact second this runs: rx_packets climbed at
+# 2-4/s through the whole gate phase and froze permanently within four seconds
+# of the template SET, twice, with the RSSI-threshold and metric writes ruled
+# out by the same measurement. A window with the template suppressed is not
+# discoverable -- our PSFs carry no election state -- so this is a diagnostic
+# switch, not an operating mode.
+write_template(){
+  local body header
+  [[ -e $CONF/no-template ]] && {
+    log "template write suppressed ($CONF/no-template)"; return 0; }
+  body=$(python3 "$LIB/mkpsf.py" --body --template --variant E \
+           --master "$1" --sync "$2" --distance "$3" \
+           --master-metric "$4" --self-metric "$5")
+  # The iovar takes a u16 LE length header followed by the PSF body. The
+  # working harness has always sent `le16(len) + body`; this function shipped
+  # without the header once and every SET since was rejected EFAULT -- the
+  # firmware reads a length that is not there. Found in our own published
+  # source, after a night of negatives.
+  #
+  # A write nobody checks is a write that can fail forever in silence:
+  # `awdl_payload` GET returned BCME_NOTFOUND (-30) inside live windows whose
+  # log said "template rewritten" every interval. A radio emitting bare default
+  # PSFs advertises no HT IE, so no Mac builds a peer-cache entry for us, so
+  # every Mac discards its own unicast to us before the air.
+  header=$(python3 -c "import struct;print(struct.pack('<H', $(( ${#body} / 2 ))).hex())")
+  if ! iovar_set awdl_payload "${header}${body}"; then
+    log "TEMPLATE WRITE FAILED: awdl_payload SET rejected by the firmware"
+    return 1
+  fi
+  return 0
+}
+
+# track_election: rewrite the template whenever the firmware's election moves.
+# The root DOES move mid-window -- observed changing from one peer to another while a
+# window was live -- and a template naming a root we no longer sync to
+# advertises a schedule we do not keep. Apple's driver rewrites from its own
+# election path; the research harness does it every interval; doing it once at
+# window start was the difference. The supervisor calls this each interval.
+# Hysteresis: the root FLAPS. Observed going self -> peer A -> peer B
+# in seven seconds, and rewriting on every observation turns each flap into an
+# awdl_payload SET -- churn on the one firmware path with a recorded hang
+# (023513Z), for a root that is about to change again. A state has to be
+# observed twice in a row before it is worth advertising. The first write after
+# a reset (election.state absent) is immediate: the window needs a template.
+track_election(){
+  local state previous pending
+  state=$(election_state) || return 0
+  previous=$(cat "$RUN/election.state" 2>/dev/null || echo "")
+  [[ $state == "$previous" ]] && { rm -f "$RUN/election.pending"; return 0; }
+  if [[ -n $previous ]]; then
+    pending=$(cat "$RUN/election.pending" 2>/dev/null || echo "")
+    if [[ $state != "$pending" ]]; then
+      printf '%s\n' "$state" > "$RUN/election.pending"
+      return 0                       # first sighting: wait for confirmation
+    fi
+  fi
+  rm -f "$RUN/election.pending"
+  # shellcheck disable=SC2086
+  # Only record and announce a rewrite that the firmware accepted. Recording it
+  # on a failed write is worse than useless: election.state then says we are
+  # advertising a state we are not, and the next interval sees "no change" and
+  # never retries.
+  if ! write_template $state; then
+    set -- $state
+    log "template NOT rewritten (write failed): master=$1 sync=$2 depth=$3"
+    return 1
+  fi
+  printf '%s\n' "$state" > "$RUN/election.state"
+  set -- $state
+  log "template rewritten: master=$1 sync=$2 depth=$3 (was: ${previous:-none})"
+}
+
+# write_rssi_thresholds <dBm>: GET the 42-byte election_tree, patch bytes 7, 9,
+# 10 and 11 (close_sync, edge_sync, close_range, mid_range -- byte 8,
+# master_rssi_boost, is deliberately untouched) and SET it back. Offsets from
+# setAWDL_ELECTION_RSSI_THRESHOLDS in the kernelcache; the harness has written
+# them this way since 09-09.
+#
+# Why the button needs them: at the firmware default (-80) we consider distant
+# strangers as adoptable roots, which is how a window ends up rooted on a peer
+# at -75 dBm while the Mac in the same room sits at -50 in its own tree. -60 keeps the
+# election to peers that are actually in the room.
+write_rssi_thresholds(){
+  local t=$1 before=$RUN/etree.rssi.bin payload
+  [[ ${#t} -gt 0 ]] || return 0
+  [[ $(iovar_get_len awdl_election_tree 42 "$before") -eq 42 ]] || {
+    log "rssi thresholds: readback was not 42 bytes; not writing"; return 0; }
+  payload=$(python3 - "$before" "$t" <<'PYX'
+import sys
+b = bytearray(open(sys.argv[1], 'rb').read())
+t = int(sys.argv[2]) & 0xff
+for off in (7, 9, 10, 11):
+    b[off] = t
+print(bytes(b).hex())
+PYX
+) || return 0
+  iovar_set awdl_election_tree "$payload" && log "identity: rssi thresholds ${t} dBm"
+}
+# Our AWDL identity on air: the PSF template (so our sync frames are well
+# formed) and the Arpa + _airdrop._tcp service TLVs Apple reads out of MIFs.
+write_identity(){
+  # Election configuration FIRST, template second: the template advertises the
+  # election state, so writing it before the metric and the RSSI thresholds
+  # publishes a state the firmware is about to leave.
+  #
+  # Three failed windows are the argument for both settings. At metric 600 we
+  # adopt nobody and nobody adopted us -- the peer Mac stayed Master at 510 and
+  # never saw us. At metric 100 with default thresholds we adopted whatever we
+  # could hear, including a peer at -75 dBm, and flapped between roots every few
+  # seconds. Every window that actually carried a transfer had metric 100 AND had
+  # adopted a peer that was in the room.
+  local em; em=$(self_metric)
+  iovar_set awdl_election_metric "$(le32 "$em")" && log "identity: election_metric=$em"
+  write_rssi_thresholds "$(head -1 "$CONF/rssi-sync-threshold" 2>/dev/null | tr -dc '0-9-')"
+  sleep 3                          # let the election settle before we publish it
+  rm -f "$RUN/election.state"      # force the first template write
+  track_election
+  # $CONF/no-service and $CONF/no-aftxmode: the last two writes of the startup
+  # sequence, separated because reception dies inside the same second they run
+  # (03:16:15Z, with the template already suppressed and the metric and RSSI
+  # writes ruled out). Diagnostic switches: without the service TLV nothing can
+  # resolve us, so a window with either set is a measurement, not a usable one.
+  # NOTE THE ASYMMETRY, measured: awdl_payload takes `le16(len) + body` and
+  # rejects a bare body with BCME_BUFTOOSHORT (-14, printed EFAULT);
+  # awdl_afs_pload takes the TLVs BARE and rejects a length-prefixed buffer with
+  # BCME_BUFTOOLONG (-15, printed ENOTBLK). A harness line elsewhere looks like a
+  # counter-example but belongs to a different call path -- do not "fix" this one
+  # to match it without reading the firmware's answer.
+  #
+  # These TLVs are where a Mac reads our _airdrop._tcp advert: with them a peer
+  # Mac resolves us and tiles in 3.0 s.
+  local svc
+  svc=$(python3 "$LIB/mkpsf.py" --service-only)
+  if [[ -e $CONF/no-service ]]; then
+    log "identity: afs_pload suppressed ($CONF/no-service)"
+  elif iovar_set awdl_afs_pload "$svc"; then
+    log "identity: afs_pload $(( ${#svc} / 2 )) B written"
+  else
+    log "SERVICE WRITE FAILED: awdl_afs_pload SET rejected by the firmware"
+  fi
+  if [[ -e $CONF/no-aftxmode ]]; then
+    log "identity: aftxmode suppressed ($CONF/no-aftxmode)"
+  else
+    iovar_set awdl_aftxmode "$(le32 1)" && log "identity: aftxmode=1"
+  fi
+}
+
+# nudge_peers: send one unicast packet to every pinned AWDL neighbour, every
+# interval.
+#
+# Why this is not optional. Solicited-node multicast does not cross AWDL
+# (measured: 513 NS from us, 0 NA; the peer's capture received frames to
+# 33:33:00:00:00:fb and none to 33:33:ff:xx:xx:xx). So an Apple device can
+# resolve our NAME over mDNS, get our AAAA, and then be unable to resolve the
+# ADDRESS to a MAC -- its neighbour discovery goes out to a group we never
+# receive. A peer Mac showed exactly that: `ndp -an` held every other device on
+# the link and no entry at all for our AWDL address, and a scoped ping6 returned
+# "No route to host". We pin THEIR addresses (awdl-peer-watch); nothing was
+# making them learn OURS.
+#
+# One unicast frame from us does it: the peer learns the mapping from the
+# frame's source. The research harness has pinged its peer every interval and
+# its windows were the ones Apple devices could see; the product path never did,
+# and its windows were not. Cheap, and it needs no reply to work.
+nudge_peers(){
+  local ll
+  for ll in $(ip -6 neigh show dev "$IF" 2>/dev/null | awk '/PERMANENT/{print $1}'); do
+    ping -6 -c 1 -W 1 -I "$IF" "$ll" >/dev/null 2>&1 &
+  done
+}
+# --- children ---------------------------------------------------------------
+# Everything started here is recorded in $RUN/pids and killed by stop/expiry.
+# airdrop-serve.py is deliberately NOT in this set: the receiver is not ours.
+spawn(){  # spawn <tag> <command...>
+  local tag=$1; shift
+  "$@" >>"$RUN/$tag.log" 2>&1 &
+  echo "$! $tag" >> "$RUN/pids"
+  log "started $tag (pid $!)"
+}
+
+# Idempotent by construction. Two teardowns can run at once -- `stop` TERMs the
+# supervisor, whose own trap also calls this -- and the old version read
+# $RUN/pids TWICE with a sleep between, so the loser died on "No such file or
+# directory" partway through ("stopped" logged twice). A
+# half-run teardown left the window's state inconsistent. `mv` is atomic: the
+# winner takes the list and the loser sees no file and returns quietly, so the
+# whole teardown happens exactly once no matter how many callers arrive.
+kill_children(){
+  local pidfile=$RUN/pids snapshot=$RUN/pids.dying.$$
+  [[ -f $pidfile ]] || return 0
+  mv "$pidfile" "$snapshot" 2>/dev/null || return 0
+  local pid tag
+  while read -r pid tag; do
+    [[ -n ${pid:-} ]] || continue
+    kill -TERM "$pid" 2>/dev/null && log "stopped $tag (pid $pid)"
+  done < "$snapshot"
+  sleep 1
+  while read -r pid tag; do
+    [[ -n ${pid:-} ]] || continue
+    kill -KILL "$pid" 2>/dev/null
+  done < "$snapshot"
+  rm -f "$snapshot"
+}
+
+# The supervisor owns the window: it starts the advertising children, bursts
+# the announcer every interval, and tears everything down at expiry, so a
+# crashed caller cannot leave us advertising forever.
+#
+# The children are started HERE and not in cmd_start on purpose: pkexec kills
+# its process group when the invoking command exits, which silently took the
+# responder and the watcher with it (observed 22:46:10Z, both gone within
+# seconds while the setsid'd supervisor lived on). Only this process is
+# detached, so only its children survive.
+supervise(){
+  # $1 was the deadline at spawn; it is deliberately not bound, because the
+  # loop below re-reads $RUN/until so a later press can move it.
+  local secs=$2 seq=0
+  echo $$ > "$RUN/supervisor"
+  trap 'kill_children; printf stopped > "$RUN/reason"; rm -f "$RUN/until"; exit 0' TERM INT
+  spawn mdns python3 "$LIB/awdl-mdns-respond.py" --iface "$IF" --port 8771 --flags "$ADV_FLAGS"
+  # Peer registration is what makes our SYN-ACKs leave the radio: unicast to a
+  # MAC with no firmware peer entry completes 0x0003 FW_TOSSED (074311Z).
+  spawn peers python3 "$LIB/awdl-peer-watch.py" --iface "$IF" --only ""
+  if [[ -e $CONF/ble-wake ]]; then
+    # Opt-in: a Mac publishes _airdrop._tcp 1.13 s after a sender's BLE advert,
+    # so this helps the iPhone path -- but it advertises us as a SENDER and it
+    # shares the 2.4 GHz radio with AWDL. Off unless $CONF/ble-wake exists.
+    # --seconds wants a number to pace itself against; a day stands in for an
+    # unbounded window, which is longer than any battery.
+    spawn ble python3 "$LIB/ble-airdrop-adv.py" --arm A --seconds "$(( secs > 0 ? secs : 86400 ))"
+  fi
+  # The deadline is re-read every interval, not captured at spawn. cmd_start
+  # rewrites $RUN/until when a second press extends a live window, and the
+  # supervisor used to loop on its argument -- so "window extended to ..." was
+  # logged while the radio still stopped at the original time.
+  #
+  # 0 is "no expiry", the panel's "Until I turn it off". A missing file means
+  # someone tore the window down underneath us, which is a reason to stop.
+  local deadline
+  while deadline=$(cat "$RUN/until" 2>/dev/null) && [[ -n $deadline ]] \
+        && { [[ $deadline == 0 ]] || [[ $(now) -lt $deadline ]]; }; do
+    seq=$(( seq + 1 ))
+    # Anything that resets the radio -- an infra re-association, an rfkill
+    # toggle, a firmware reset -- drops awdl0 while the window is still open,
+    # and the frames below then leave on an interface nothing can bind to
+    # (08:26:12Z: status ok, receiver activating, awdl0 DOWN). Re-assert it
+    # every interval: `ip link set up` on an already-up link is a no-op, so
+    # this costs nothing when the link is healthy and restores it when it
+    # is not.
+    if ! ip -6 addr show dev "$IF" scope link 2>/dev/null | grep -q inet6; then
+      log "awdl0 lost its link-local mid-window -- re-asserting the link"
+      ip link set "$IF" up 2>/dev/null
+      ip link set "$IF" promisc on 2>/dev/null
+      ip link set "$IF" allmulticast on 2>/dev/null
+    fi
+    track_election
+    python3 "$LIB/awdl-airdrop-adv.py" --iface "$IF" --count "$ADV_COUNT" \
+      --interval 0.02 --flags "$ADV_FLAGS" --seq $(( seq * 100 )) >/dev/null 2>&1
+    sleep "$ADV_INTERVAL"
+  done
+  log "window expired"
+  kill_children
+  printf expired > "$RUN/reason"
+  rm -f "$RUN/until"
+}
+
+supervisor_pid(){ cat "$RUN/supervisor" 2>/dev/null; }
+# /proc, not `kill -0`: status runs as the unprivileged user and signalling a
+# root process fails with EPERM, which reported a live window as expired.
+supervisor_alive(){ local p; p=$(supervisor_pid)
+                    [[ -n ${p:-} && -d /proc/$p ]] && grep -qa awdl-discoverable "/proc/$p/cmdline" 2>/dev/null; }
+
+# --- commands ---------------------------------------------------------------
+cmd_start(){
+  local secs=${1:-}
+  # 0 is a window with no expiry, which is what the panel's "Until I turn it
+  # off" asks for. Rejecting it made that setting fail with a usage string in
+  # the panel: omdrop passes ${secs:-0}, so every unbounded press sent a 0.
+  [[ $secs =~ ^[0-9]+$ ]] || die 2 "usage: $0 start <seconds> (0 = until stopped)"
+  need_root start "$secs"
+  mkdir -p "$RUN"
+  # One start at a time. `supervisor_alive` only catches a window that is
+  # already UP; two presses of the button seconds apart put two starts in the
+  # GATE phase at once, and they toggle `awdl=0/1` under each other so both
+  # probe 0 completions forever and both report parked (observed 00:16-00:17Z:
+  # two `start 600` processes, three consecutive 0-completion probes).
+  exec 9>"$RUN/start.lock"
+  if ! flock -n 9; then
+    log "another start is already in its gate; not racing it"
+    exit 5
+  fi
+
+  if supervisor_alive; then
+    # A live supervisor reads $RUN/until every interval, so rewriting it is how
+    # a second press changes the deadline -- including to 0, "no expiry".
+    if (( secs > 0 )); then
+      date -d "+$secs seconds" +%s > "$RUN/until"
+      log "already discoverable; window extended to $(date -u -d "@$(cat "$RUN/until")" +%H:%M:%SZ)"
+    else
+      printf 0 > "$RUN/until"
+      log "already discoverable; window now runs until turned off"
+    fi
+    printf ok > "$RUN/reason"
+    exit 5
+  fi
+  # A dead supervisor may still have left children behind (SIGKILL, crash).
+  kill_children
+
+  # awdl0 goes away for two very different reasons, and they used to print the
+  # same sentence: "the AWDL driver is not loaded".
+  #
+  # The common one is not a driver problem at all. Toggling Wi-Fi off and on
+  # destroys the AWDL vif while brcmfmac stays loaded, so the machine is one
+  # `awdl-if create` away from working -- about two seconds, no reload, no cost
+  # to the Wi-Fi link. Telling the user their driver is missing, and refusing,
+  # was wrong on the diagnosis and wrong on the remedy. Rebuild the interface
+  # and carry on.
+  if ! awdl0_ready && driver_loaded; then
+    log "$IF is missing but the driver is loaded (a Wi-Fi off/on removes it); rebuilding it"
+    timeout 60 "$LIB/awdl-up" >/dev/null 2>&1 || true
+    awdl0_ready || sleep 2
+  fi
+
+  if ! awdl0_ready; then
+    printf no_awdl0 > "$RUN/reason"
+    # No paths, no iovar names: this is read by someone holding a laptop.
+    if driver_loaded; then
+      die 4 "AirDrop's radio interface could not be started. Turning Wi-Fi off and back on usually clears this; a restart always does."
+    fi
+    die 4 "AirDrop's Wi-Fi driver is not loaded, so this machine cannot be discovered. Restart to load it."
+  fi
+  ip link set "$IF" promisc on 2>/dev/null; ip link set "$IF" allmulticast on 2>/dev/null
+
+  gate; GATE_RC=$?
+  case "$GATE_RC" in
+    0) : ;;
+    2) printf parked > "$RUN/reason"
+       log "gate: data-path probe inconclusive; firmware state unclassified"
+       die 3 "AirDrop's radio did not answer a test. Try again in a moment." ;;
+    *) printf parked > "$RUN/reason"
+       # Two different dead ends, and telling the user to "just retry" in the
+       # second one is a lie: a retry five times over twelve minutes got a
+       # byte-identical failure each time. When a template is loaded the gate
+       # refuses the awdl=0 retoggle (023513Z), which is the ONLY thing that
+       # clears a parked path -- so it can never recover itself. The template
+       # cannot be cleared either: a zero-length awdl_payload SET is rejected
+       # BCME_BADARG, and any replacement write still reads back 512 bytes, so
+       # the guard still sees "loaded". A driver reload is the only exit.
+       # The panel shows the last line, so the evidence goes above it and the
+       # sentence a person reads goes last. Naming a reload in a panel is
+       # useless -- there is nothing to press -- and a restart clears the same
+       # state without a terminal.
+       if [[ $(iovar_get_len awdl_payload 512 "$RUN/payload.bin") -gt 0 ]]; then
+         log "parked with a template loaded (023513Z): the gate cannot retoggle awdl, retrying is byte-identical. Reload to clear: pkexec $LIB/awdl-up --reload (~15 s of Wi-Fi)."
+         die 3 "AirDrop's radio is stuck and cannot restart itself. Restarting this machine clears it."
+       fi
+       log "parked after $ENABLES enables; no template loaded, so a retoggle can still clear it"
+       die 3 "AirDrop's radio would not start transmitting. Try again -- a second attempt usually works." ;;
+  esac
+
+  # The gate toggles awdl=0/1, and every disable drops the netdev: the link
+  # awdl0_ready brought up above is DOWN again by the time the gate returns,
+  # and nothing else re-ups it. That shipped a window advertising on a dead
+  # interface -- no IFF_UP, no link-local, the receiver unable to bind, and
+  # `reason` still ok (observed 07:57:30Z and 08:15:56Z, on both bands, after
+  # the firmware itself was provably fine: afrx/aftx kept climbing throughout).
+  # Re-assert the link and require the address before claiming the window, so
+  # a dead netdev reports no_awdl0 instead of lying with ok.
+  ip link set "$IF" up 2>/dev/null
+  local w
+  for w in $(seq 1 30); do
+    ip -6 addr show dev "$IF" scope link 2>/dev/null | grep -q inet6 && break
+    sleep 0.5
+  done
+  if ! ip -6 addr show dev "$IF" scope link 2>/dev/null | grep -q inet6; then
+    printf no_awdl0 > "$RUN/reason"
+    die 4 "awdl0 has no link-local 15 s after the gate -- the data path is up but nothing can bind to it"
+  fi
+
+  write_identity
+
+  # 0 in, 0 through: an unbounded window has no deadline to write, and the
+  # supervisor and status both read the sentinel rather than a date.
+  local until; until=0
+  (( secs > 0 )) && until=$(( $(now) + secs ))
+  echo "$until" > "$RUN/until"
+  printf ok > "$RUN/reason"
+  # Detached: pkexec tears down its process group when this call returns, and
+  # the advertising children must outlive it. The supervisor writes its own pid.
+  # 9>&-: the start lock must not be inherited, or the supervisor would hold it
+  # for the whole window and every later start would exit 5 instead of extending.
+  setsid "$0" __supervise "$until" "$secs" >>"$LOG" 2>&1 9>&- &
+  # Wait for the supervisor to claim the window, so `start` never returns 0 on
+  # a window that failed to come up.
+  local i
+  for i in 1 2 3 4 5 6 7 8 9 10; do supervisor_alive && break; sleep 0.5; done
+  supervisor_alive || { printf stopped > "$RUN/reason"; die 3 "supervisor did not start"; }
+  if (( secs > 0 )); then
+    log "discoverable until $(date -u -d "@$until" +%H:%M:%SZ) (${secs}s)"
+  else
+    log "discoverable until turned off"
+  fi
+  exit 0
+}
+
+cmd_stop(){
+  need_root stop
+  mkdir -p "$RUN"
+  local p; p=$(supervisor_pid)
+  [[ -n ${p:-} ]] && kill -TERM "$p" 2>/dev/null
+  sleep 1
+  kill_children
+  # A `start` still in its gate phase owns no supervisor and no pids file, but
+  # it is toggling `awdl=0/1` -- so "stop" has to mean that too, or a stuck gate
+  # keeps cycling the radio after the user has switched the button off.
+  local other
+  for other in $(pgrep -f "$0 start" 2>/dev/null); do
+    [[ $other == $$ ]] && continue
+    kill -TERM "$other" 2>/dev/null && log "cancelled a start still in its gate (pid $other)"
+  done
+  rm -f "$RUN/until" "$RUN/supervisor"
+  printf stopped > "$RUN/reason"
+  log "stopped"
+  exit 0
+}
+
+cmd_status(){
+  local until remaining visible reason rxp
+  until=$(cat "$RUN/until" 2>/dev/null || echo "")
+  reason=$(cat "$RUN/reason" 2>/dev/null || echo stopped)
+  rxp=$(cat "$RUN/rx_proven" 2>/dev/null || echo 0)
+  if ! ip link show "$IF" >/dev/null 2>&1; then
+    visible=false; remaining=null; reason=no_awdl0
+  elif ! ip -6 addr show dev "$IF" scope link 2>/dev/null | grep -q inet6; then
+    # Present but unusable. The interface can exist and the firmware can be
+    # transmitting (afrx/aftx climbing) while the netdev is administratively
+    # down -- no IFF_UP, no link-local -- and then nothing can bind to :8771
+    # and no transfer can land. Reporting ok there is worse than reporting
+    # nothing: it sent a peer into three sends against a void (08:26:12Z) and
+    # cost an evening of 5 GHz false negatives. A window is only ok when the
+    # address a sender must reach actually exists.
+    visible=false; remaining=null; reason=no_awdl0
+  elif supervisor_alive && [[ $until == 0 || ( -n $until && $(now) -lt $until ) ]]; then
+    # The window is live either way -- we ARE advertising and remaining is real
+    # -- but the gate may have opened it on transmit alone. Say which, so a
+    # panel can distinguish "visible to everyone" from "advertising, nothing
+    # has answered yet" instead of calling both ok.
+    visible=true
+    remaining=$([[ $until == 0 ]] && echo null || echo $(( until - $(now) )))
+    if [[ $rxp == 1 ]]; then reason=ok; else reason=unproven; fi
+  else
+    visible=false; remaining=null
+    [[ $reason == ok || $reason == unproven ]] && reason=expired
+  fi
+  if [[ ${1:-} == --json ]]; then
+    printf '{"visible":%s,"remaining":%s,"reason":"%s","rx_proven":%s}\n' \
+      "$visible" "$remaining" "$reason" "$([[ $rxp == 1 ]] && echo true || echo false)"
+  else
+    printf 'visible=%s remaining=%s reason=%s rx_proven=%s\n' \
+      "$visible" "$remaining" "$reason" "$([[ $rxp == 1 ]] && echo true || echo false)"
+  fi
+  exit 0
+}
+
+# peers: the firmware's own view of who is on air -- address, RSSI, self
+# metric, and crucially the root EACH PEER ADVERTISES (top_master/dist). Two
+# devices can only exchange data inside a tree they share, so "which root is
+# that Mac on" is the question that separates "we are invisible" from "we are in a
+# different tree". Read-only: one GET, no SET, no toggles.
+cmd_peers(){
+  need_root peers
+  mkdir -p "$RUN"
+  local raw=$RUN/advertisers.bin len
+  len=$(iovar_get_len awdl_advertisers 1024 "$raw")
+  [[ ${len:-0} -gt 0 ]] || { echo "awdl_advertisers: no reply (is AWDL enabled?)" >&2; exit 4; }
+  python3 "$LIB/awdl-peers.py" "$raw"
+  exit 0
+}
+
+# diag: why is the receive side dead? Read-only -- GETs, no SET, no toggle, so
+# it is safe to run inside a live window and it cannot perturb what it
+# measures. Two awdl_stats snapshots <seconds> apart, plus the schedule the
+# firmware is actually keeping and the master it is actually synced to.
+#
+# The question it answers: 20/20 completions with zero inbound data frames has
+# two very different causes, and they need different fixes.
+#
+#   afrx climbing, datarx flat, misalign/lostmaster/noawchansw climbing
+#       -> we are not on the root's schedule. The frames are not arriving
+#          because the radio is elsewhere when they are sent.
+#   afrx and rx80211 climbing, datarx flat, rxdrop/awdrop/afrxdrop climbing
+#       -> the frames arrive and the firmware discards them.
+#   nothing climbing at all
+#       -> the receive path is parked, not merely misaligned.
+#
+# `noawchansw` is the one to watch on this machine: the master AW is channel 6
+# while the infra link sits on 44, so every master AW costs a band switch.
+cmd_diag(){
+  need_root diag
+  mkdir -p "$RUN"
+  local secs=${1:-15} rx0 rx1
+  iovar_get_len awdl_opmode 12 "$RUN/diag.opmode.bin" >/dev/null
+  iovar_get_len awdl_chan_seq 64 "$RUN/diag.chanseq.bin" >/dev/null
+  iovar_get_len awdl_sync_params 64 "$RUN/diag.sync.bin" >/dev/null
+  python3 - "$RUN/diag.opmode.bin" "$RUN/diag.chanseq.bin" "$RUN/diag.sync.bin" <<'PYX'
+import struct, sys
+opmode, chanseq, sync = sys.argv[1:4]
+def load(path):
+    try:
+        return open(path, 'rb').read()
+    except OSError:
+        return b''
+b = load(opmode)
+if len(b) >= 10:
+    mode, role, bcast = struct.unpack_from('<BBH', b, 0)
+    master = ':'.join(f'{x:02x}' for x in b[4:10])
+    print(f'opmode      mode={mode} role={role} bcast={bcast}  sync_master={master}')
+else:
+    print(f'opmode      unreadable ({len(b)} B)')
+b = load(sync)
+if len(b) >= 36:
+    f = struct.unpack_from('<BHBHBBHHHHHH', b, 0)
+    print(f'sync_params master_chan={f[4]} aw_period={f[6]} af_period={f[7]} '
+          f'flags=0x{f[8]:04x} ext={f[9]} common={f[10]} presence={b[30]}')
+else:
+    print(f'sync_params unreadable ({len(b)} B)')
+b = load(chanseq)
+if len(b) >= 38:
+    slots = [b[6 + 2 * i] for i in range(16)]
+    print('chan_seq    ' + ' '.join(f'{c:>3}' for c in slots))
+else:
+    print(f'chan_seq    unreadable ({len(b)} B)')
+PYX
+  iovar_get_len awdl_stats 324 "$RUN/diag.stats.0.bin" >/dev/null
+  rx0=$(cat "/sys/class/net/$IF/statistics/rx_packets" 2>/dev/null || echo 0)
+  sleep "$secs"
+  iovar_get_len awdl_stats 324 "$RUN/diag.stats.1.bin" >/dev/null
+  rx1=$(cat "/sys/class/net/$IF/statistics/rx_packets" 2>/dev/null || echo 0)
+  # Both directions. --rx hid aftx, and 04:5xZ that was the field in question:
+  # a Mac only schedules unicast to a peer in its table, and its table is built
+  # from our ACTION frames -- so "are we emitting any" is as important as what
+  # we receive.
+  python3 "$LIB/awdl-stats.py" "$RUN/diag.stats.0.bin" "$RUN/diag.stats.1.bin"
+  printf 'netdev rx_packets %s -> %s over %ss (%+d)\n' "$rx0" "$rx1" "$secs" "$(( rx1 - rx0 ))"
+  exit 0
+}
+
+# read <iovar> [len]: one GET, hexdumped. Read-only by construction -- there is
+# no code path here that writes, and the verb name carries no value argument to
+# write with.
+#
+# Why it exists: the investigation reached "what did the firmware actually
+# store when we wrote awdl_peer_op ADD for that peer?", and nothing could
+# answer it. brcm_iovar.py needs root, root here means pkexec, and only this
+# script is allowlisted -- so every readback of a new iovar cost a password
+# prompt. GETs are the whole diagnostic vocabulary of this project; they should
+# not need a human.
+cmd_read(){
+  local name=${1:-} len=${2:-512}
+  [[ -n $name ]] || die 2 "usage: $0 read <iovar> [len]"
+  [[ $name =~ ^[a-z0-9_]+$ ]] || die 2 "iovar names are lowercase, digits and underscore"
+  [[ $len =~ ^[0-9]+$ && $len -le 8192 ]] || die 2 "len must be a number up to 8192"
+  need_root read "$name"
+  mkdir -p "$RUN"
+  local raw=$RUN/read.$name.bin got
+  got=$(iovar_get_len "$name" "$len" "$raw")
+  [[ ${got:-0} -gt 0 ]] || { echo "$name: no reply (unsupported, or AWDL disabled)" >&2; exit 4; }
+  echo "$name: $got bytes"
+  od -An -tx1 -v "$raw" | sed 's/^ /  /' | head -64
+  exit 0
+}
+
+case "${1:-}" in
+  start)  shift; cmd_start "$@" ;;
+  stop)   cmd_stop ;;
+  status) shift; cmd_status "$@" ;;
+  peers)  cmd_peers ;;
+  diag)   shift; cmd_diag "$@" ;;
+  read)   shift; cmd_read "$@" ;;
+  __supervise) need_root; supervise "$2" "$3" ;;
+  *) printf 'usage: %s start <seconds> | stop | status [--json] | peers | diag [seconds] | read <iovar> [len]\n' "$0" >&2; exit 2 ;;
+esac
