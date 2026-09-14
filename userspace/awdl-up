@@ -1,0 +1,225 @@
+#!/usr/bin/env bash
+# Bring awdl0 into existence at boot, configured but NOT advertising.
+#
+#   awdl-up            create + configure awdl0 (idempotent; safe to re-run)
+#   awdl-up --status   print what exists, exit 0 if awdl0 is ready
+#
+# Run by awdl0.service at boot. Root: every step is an nl80211 vendor dcmd on
+# the Wi-Fi interface or awdl0, or an `ip link` operation.
+#
+# WHAT THIS DELIBERATELY DOES NOT DO: it does not enable AWDL (`awdl=1`), does
+# not write a PSF template, and starts no announcer. An always-on AWDL keeps the
+# radio leaving the infra channel on its slot schedule -- that costs battery and
+# STA throughput, and it would keep two known failure modes live during ordinary
+# laptop use: the ~50% parked data path, and the firmware hang seen when `awdl=0`
+# runs with a template loaded (023513Z). So boot leaves a configured, idle
+# interface, and `omdrop-discoverable start` does the enable/gate/announce work
+# for the length of a user-requested window. Cost of that choice: the first
+# press of the button pays the gate (15-60 s), not the boot.
+#
+# The AWDL MAC is derived from the Wi-Fi interface's, so this refuses to run
+# while that interface carries a NetworkManager scan-randomised address --
+# otherwise awdl0 comes up under an address that changes on the next scan.
+set -uo pipefail
+
+# Helpers are siblings of this script: /usr/lib/omdrop when packaged.
+LIB="$(cd "$(dirname "$(readlink -f "$0")")" && pwd)"
+CONF=${OMDROP_CONF:-/etc/omdrop}
+export OMDROP_CONF="$CONF"
+IF=awdl0
+# The marker names the patched module currently loaded, for anything that wants
+# to know whether a reload is needed before trusting the AWDL iovars.
+MARK=/run/awdl-patched-loaded
+# The packaged vendor file; the /etc copy is only written when neither exists,
+# so a machine that has edited the vendor setting keeps its edit.
+NMCONF_VENDOR=/usr/lib/NetworkManager/conf.d/99-awdl-unmanaged.conf
+NMCONF=/etc/NetworkManager/conf.d/99-awdl-unmanaged.conf
+WAIT_STA=${AWDL_WAIT_STA:-60}          # seconds to wait for the infra interface
+WAIT_MAC=${AWDL_WAIT_MAC:-90}          # seconds to wait for it to stop randomising
+
+# The Wi-Fi interface is found, not assumed. It is wlan0 on a stock Arch
+# install and wld0 on a machine carrying a naming rule, and hardcoding either
+# gives a package that works on exactly one of them. Override with
+# $AWDL_STA or $CONF/infra-iface when a machine has two Broadcom radios.
+find_sta(){
+  local n d
+  for n in /sys/class/net/*; do
+    n=${n##*/}
+    [[ $n == "$IF" ]] && continue
+    [[ -d /sys/class/net/$n/phy80211 ]] || continue
+    d=$(readlink -f "/sys/class/net/$n/device/driver" 2>/dev/null) || continue
+    [[ ${d##*/} == brcmfmac* ]] && { printf '%s' "$n"; return 0; }
+  done
+  return 1
+}
+STA=${AWDL_STA:-$(cat "$CONF/infra-iface" 2>/dev/null || true)}
+
+MCH=$(cat "$CONF/master-chan" 2>/dev/null || echo 6)
+PCH=$(cat "$CONF/peer-chan"   2>/dev/null || echo 44)
+SHAPE=$(cat "$CONF/chan-shape" 2>/dev/null || echo dense)
+
+log(){ printf '%s %s\n' "$(date -u +%H:%M:%SZ)" "$*"; }
+iovar_set(){ timeout 8 python3 "$LIB/brcm_iovar.py" -i "$1" set "$2" "$3" >/dev/null 2>&1; }
+iovar_bytes(){ local out=/run/awdl-up.readback; rm -f "$out"
+                timeout 8 python3 "$LIB/brcm_iovar.py" -i "$IF" get "$1" -l "$2" \
+                  --raw "$out" >/dev/null 2>&1
+                stat -c %s "$out" 2>/dev/null || echo 0; }
+# 1 while AWDL is enabled. A window is live then, and the schedule iovars are
+# SET-only while it is disabled, so there is nothing safe to do.
+awdl_enabled(){ [[ $(iovar_bytes awdl 4) -gt 0 ]] || return 1
+                [[ $(od -An -tu1 -N1 /run/awdl-up.readback | tr -d ' ') != 0 ]]; }
+# A loaded PSF template makes `awdl=0` unsafe: 023513Z hung the firmware doing
+# exactly that. Reconfiguring then needs a driver reload, not a retoggle.
+template_loaded(){ [[ $(iovar_bytes awdl_payload 512) -gt 0 ]]; }
+
+# Channel sequence and availability windows. SET-only while AWDL is disabled,
+# and they persist in the firmware -- so a later `awdl=1` from
+# awdl-discoverable inherits them. Shared by the create path and the
+# re-apply path so the two can never drift.
+apply_schedule(){
+  local SEQ SYNC
+  SEQ=$(python3 -c "
+import sys
+peer, mch, shape = int(sys.argv[1]), int(sys.argv[2]), sys.argv[3]
+slots={'sparse':[peer,0,149,0,0,0,0,0,mch,0,149,0,0,0,0,0],
+       'dense': [peer,peer,149,0,0,0,0,peer,mch,peer,149,peer,0,0,0,peer],
+       'full':  [peer,peer,149,peer,peer,149,peer,peer,mch,peer,149,peer,peer,149,peer,peer],
+       'dense44':[peer,peer,149,peer,peer,peer,peer,peer,mch,peer,149,peer,peer,peer,peer,peer]}[shape]
+oc={0:0,1:81,6:81,11:81,36:128,40:128,44:128,48:128,149:128,153:128,157:128,161:128}
+print((bytes([15,3,0,3])+(0xffff).to_bytes(2,'little')+b''.join(bytes([c,oc[c]]) for c in slots)).hex())" "$PCH" "$MCH" "$SHAPE")
+  SYNC=$(python3 -c "
+import struct
+b=bytearray(36); struct.pack_into('<BHBHBBHHHHHH',b,0,0,36,0,0,$MCH,0,16,110,0x1000,16,16,0)
+b[20:24]=bytes([3,3,3,3]); b[30]=4; print(bytes(b).hex())")
+  iovar_set "$IF" awdl 00000000
+  iovar_set "$IF" awdl_chan_seq "$SEQ"      && log "chan_seq set ($SHAPE, peer $PCH, master $MCH)"
+  iovar_set "$IF" awdl_sync_params "$SYNC"  && log "sync_params set"
+  iovar_set "$IF" awdl_extcounts 03030303
+  iovar_set "$IF" awdl_presencemode 04000000
+}
+# Re-apply the channel schedule to an interface that already exists, when doing
+# so is safe. Skipping is normal and must never fail the unit.
+reconfigure_or_skip(){
+  if awdl_enabled; then
+    log "AWDL is enabled (a window is live); leaving the schedule alone"; return 0
+  fi
+  if template_loaded; then
+    log "a PSF template is loaded; not touching awdl=0 (023513Z hang) -- reload the driver to reconfigure"
+    return 0
+  fi
+  apply_schedule
+  log "schedule re-applied to the existing $IF"
+}
+
+# --reload: the only way to change chan_seq once a window has run. A PSF
+# template persists in the firmware until the module is unloaded, and `awdl=0`
+# with one loaded hung the firmware once -- so reconfiguring safely means
+# starting the firmware over. Unloading takes awdl0 and the Wi-Fi link with it;
+# NetworkManager brings the Wi-Fi interface back on its own, and the caller
+# waits for the MAC to settle exactly as a boot does.
+#
+# This exists so a channel-sequence change can be applied without a reboot:
+# awdl-up is reachable through polkit, `modprobe` is not.
+reload_driver(){
+  local mod
+  log "unloading brcmfmac (awdl0 and the Wi-Fi link go with it)"
+  for mod in brcmfmac_wcc brcmfmac; do
+    modprobe -r "$mod" 2>/dev/null || log "modprobe -r $mod failed (in use?)"
+  done
+  sleep 2
+  modprobe brcmfmac || { log "modprobe brcmfmac FAILED -- no Wi-Fi. Reboot to recover."; return 1; }
+  log "brcmfmac reloaded; waiting for the Wi-Fi interface"
+  wait_sta || { log "no Wi-Fi interface ${WAIT_STA}s after reload"; return 4; }
+  log "$STA back"
+  return 0
+}
+
+# Wait for the infrastructure interface to appear, resolving its name on the
+# way. At boot the driver may not have probed yet, so "absent" and "not named
+# yet" are the same condition and both are worth waiting out.
+wait_sta(){
+  local waited=0
+  while :; do
+    if [[ -n $STA ]]; then
+      ip link show "$STA" >/dev/null 2>&1 && return 0
+    else
+      STA=$(find_sta) && [[ -n $STA ]] && { log "infra interface: $STA"; return 0; }
+    fi
+    (( waited >= WAIT_STA )) && return 1
+    sleep 1; waited=$(( waited + 1 ))
+  done
+}
+
+if [[ ${1:-} == --status ]]; then
+  ip -br link show "$IF" 2>/dev/null && ip -6 -br addr show dev "$IF" 2>/dev/null
+  ip link show "$IF" >/dev/null 2>&1; exit $?
+fi
+RELOAD=0
+[[ ${1:-} == --reload ]] && RELOAD=1
+[[ $EUID -eq 0 ]] || { echo "needs root" >&2; exit 1; }
+
+# Already there. Re-running must never disturb a live interface (a
+# `systemctl restart` mid-session is expected) -- but it MUST be able to
+# re-apply the schedule, because chan_seq and sync_params are SET-only while
+# AWDL is disabled, so a changed $CONF/peer-chan would otherwise do nothing
+# until the next reboot. The argument: a room ran its availability windows on
+# 149 and 6 (600+ action frames, never 44) while we sat on a 44-dominant
+# sequence, transmitting where nobody listened.
+if (( RELOAD )); then
+  reload_driver || exit $?
+  # awdl0 died with the module; fall through to the create path below, which
+  # waits for the permanent MAC and writes the schedule into fresh firmware.
+elif ip link show "$IF" >/dev/null 2>&1; then
+  ip link set "$IF" up 2>/dev/null
+  log "$IF already present: $(ip -br link show "$IF")"
+  reconfigure_or_skip
+  exit 0
+fi
+
+# NM must not manage awdl0: a managed awdl0 gets a randomised MAC and no
+# link-local, which voids every address the peers target. The package ships the
+# vendor copy; this only writes /etc when neither file is present, so a removed
+# or edited setting is not silently reinstated.
+if [[ ! -f $NMCONF && ! -f $NMCONF_VENDOR ]]; then
+  printf '[keyfile]\nunmanaged-devices=interface-name:awdl0\n' > "$NMCONF"
+  nmcli general reload 2>/dev/null || systemctl reload NetworkManager 2>/dev/null
+  log "wrote $NMCONF"
+fi
+
+wait_sta || { log "no Broadcom Wi-Fi interface after ${WAIT_STA}s -- is the patched driver installed?"; exit 4; }
+# NetworkManager randomises the Wi-Fi MAC for the pre-association scan and
+# restores the permanent address when it associates, so a boot-time start lands
+# inside that gap: this unit exited 5 there, the laptop came up with no awdl0,
+# and the receiver crash-looped behind it for want of a link-local. Wait for the
+# address to settle instead of refusing on the first look.
+wait_permaddr(){
+  local waited=0
+  while ip -d link show "$STA" | grep -q permaddr; do
+    [[ $waited -ge $WAIT_MAC ]] && return 1
+    sleep 2; waited=$(( waited + 2 ))
+  done
+  [[ $waited -gt 0 ]] && log "$STA settled onto its permanent MAC after ${waited}s"
+  return 0
+}
+if ! wait_permaddr; then
+  log "$STA still on a randomised MAC after ${WAIT_MAC}s ($(ip -br link show "$STA")); refusing to derive an AWDL address from it"
+  exit 5
+fi
+
+log "creating $IF from $STA"
+timeout 20 python3 "$LIB/brcm_iovar.py" -i "$STA" awdl-if create 2>&1 | sed 's/^/  /'
+sleep 2
+ip link show "$IF" >/dev/null 2>&1 || { log "awdl-if create did not produce $IF"; exit 4; }
+ip link set "$IF" up
+
+apply_schedule
+
+# "The patched module now loaded is this one." Anything deciding whether it has
+# to reload the driver before trusting the AWDL iovars reads this instead of
+# guessing, and a reload costs minutes of Wi-Fi.
+if SRCVER=$(cat /sys/module/brcmfmac/srcversion 2>/dev/null) && [[ -n $SRCVER ]]; then
+  printf '%s\n' "$SRCVER" > "$MARK"
+  log "marker $MARK = $SRCVER"
+fi
+
+log "ready: $(ip -br link show "$IF")  $(ip -6 -br addr show dev "$IF" | tr -s ' ')"
