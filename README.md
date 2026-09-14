@@ -1,6 +1,6 @@
 # omdrop-awdl
 
-AWDL support for the Broadcom BCM4387, as eleven patches to `brcmfmac` and a DKMS package that builds them.
+AWDL support for the Broadcom BCM4387: eleven patches to `brcmfmac`, a DKMS package that builds them, and the root-side helpers that drive the result.
 
 AWDL — Apple Wireless Direct Link — is the link layer AirDrop and AirPlay run over. These patches create an `awdl0` interface from the firmware's own AWDL implementation, rather than reimplementing the protocol in userspace.
 
@@ -8,6 +8,8 @@ This is the driver half of an upcoming "Omdrop" plugin for [Omarchy M](https://g
 
 - [Hardware](#hardware)
 - [Install](#install)
+- [What the package installs](#what-the-package-installs)
+- [Configuration](#configuration)
 - [DKMS Failsafe](#dkms-failsafe)
 - [The patches](#the-patches)
 - [Maintenance](#maintenance)
@@ -38,6 +40,50 @@ Then reboot, or reload the driver when the link can go down for a minute:
 sudo modprobe -r brcmfmac_wcc brcmfmac brcmutil
 sudo modprobe brcmfmac
 ```
+
+Enable the boot-time interface setup, which creates and configures `awdl0` without enabling AWDL or advertising anything:
+
+```bash
+sudo systemctl enable --now awdl0.service
+```
+
+Discoverability stays off until something asks for it. The omdrop plugin's panel button is the usual caller; from a terminal:
+
+```bash
+pkexec /usr/lib/omdrop/omdrop-discoverable start 600   # visible for ten minutes
+pkexec /usr/lib/omdrop/omdrop-discoverable stop
+/usr/lib/omdrop/omdrop-discoverable status --json      # no root needed
+```
+
+## What the package installs
+
+| Path | What it is |
+|---|---|
+| `/usr/src/brcmfmac-awdl-<ver>/` | Patched `brcmfmac` sources; DKMS builds them for every kernel |
+| `/usr/lib/omdrop/omdrop-discoverable` | Opens and closes a bounded discoverability window: data-path gate, PSF template, announcer, mDNS responder, peer registration |
+| `/usr/lib/omdrop/awdl-up` | Creates and configures `awdl0`; run at boot by `awdl0.service` |
+| `/usr/lib/omdrop/*.py` | The iovar, frame-building and decoding helpers the two above call |
+| `/usr/share/polkit-1/actions/org.omarchy.omdrop.policy` | Action `org.omarchy.omdrop.discover`, bound to `omdrop-discoverable`, so a desktop session can become discoverable without a password |
+| `/usr/lib/systemd/system/awdl0.service` | Boot-time `awdl0` setup. Not enabled by the install |
+| `/usr/lib/modprobe.d/brcmfmac-awdl.conf` | `debug=0x1000`, which the data-path gate counts `awdl txstatus` lines from |
+| `/usr/lib/NetworkManager/conf.d/99-awdl-unmanaged.conf` | Keeps NetworkManager off `awdl0` |
+| `/usr/share/doc/brcmfmac-awdl-dkms/` | This README, and an optional `10-wld0.link` the package does not activate |
+
+Boot creates `awdl0` but does **not** enable AWDL. An always-on AWDL makes the radio follow its slot schedule across channels, leaving the infra channel periodically — battery and STA throughput spent continuously for a feature used in bursts — and permanent discoverability is a privacy posture nobody asked for. The cost of the choice is that the first window pays the data-path gate, 15–60 s, instead of the boot paying it.
+
+## Configuration
+
+Nothing is required. Every tunable has a working default, and the helpers read the machine's own MAC, Wi-Fi interface and hostname at runtime rather than carrying a baked-in copy. To override one, drop a one-line file in `/etc/omdrop/`:
+
+| File | Default | Meaning |
+|---|---|---|
+| `infra-iface` | first Broadcom Wi-Fi interface | The interface `awdl0` is derived from |
+| `awdl-host` | `<short hostname>-awdl` | The name advertised over AWDL and answered over mDNS |
+| `master-chan` | `6` | Master availability-window channel |
+| `peer-chan` | `44` | Peer availability-window channel |
+| `chan-shape` | `dense` | Slot density: `sparse`, `dense`, `full`, `dense44`, `mirror` |
+| `election-metric` | `100` | The election metric advertised and enforced |
+| `rssi-sync-threshold` | firmware default | dBm floor for adopting a peer as root; `-60` keeps the election to the room |
 
 ## DKMS Failsafe
 
@@ -73,11 +119,11 @@ The two largest gaps: receive is stable only with the Wi-Fi link on 2.4 GHz, and
 
 ## Provenance
 
-These patches were developed with AI assistance.
+The patches and the helpers were developed with AI assistance.
 
 They were not submitted to Asahi Linux, whose [generative AI policy](https://asahilinux.org/llm-policy/) forbids AI-assisted contributions. That is their call and this repository is not an argument with it — it exists so the work is available to people who want it, under the same licence as the code it derives from.
 
-Derived from the Asahi Linux kernel tree and licensed **GPL-2.0-only**, as the kernel is. Authorship and `Signed-off-by` lines are preserved in each patch.
+The kernel patches derive from the Asahi Linux kernel tree and are licensed **GPL-2.0-only**, as the kernel is; authorship and `Signed-off-by` lines are preserved in each patch. The userspace helpers are original work under the same licence. They were written from published field descriptions — Broadcom's `wlioctl.h`, the Wireshark AWDL dissector, SEEMOO's papers — and from this project's own measurements, not from [owl](https://github.com/seemoo-lab/owl)'s GPLv3 source.
 
 ## Trademark
 
