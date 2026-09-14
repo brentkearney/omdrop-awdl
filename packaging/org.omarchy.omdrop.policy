@@ -1,0 +1,33 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE policyconfig PUBLIC
+ "-//freedesktop//DTD PolicyKit Policy Configuration 1.0//EN"
+ "http://www.freedesktop.org/software/polkit/policyconfig-1.dtd">
+
+<!--
+  The distributable replacement for a udev/polkit rule naming script paths
+  under a user's home. Such a rule whitelists paths anything running as that
+  user can rewrite, which is an acceptable trade on a single research machine
+  and not one to ship. This grants a named action instead, bound by annotation
+  to one helper at a root-owned path that an unprivileged user cannot modify.
+
+  allow_active is yes because becoming discoverable is an ordinary thing to do
+  from your own seat, like joining a network, and the helper does exactly that
+  one job. Remote and inactive sessions must authenticate as an administrator:
+  nobody should turn on a machine's discoverability from somewhere else.
+-->
+<policyconfig>
+  <vendor>Omarchy omdrop</vendor>
+  <vendor_url>https://github.com/brentkearney/omdrop-awdl</vendor_url>
+
+  <action id="org.omarchy.omdrop.discover">
+    <description>Make this computer visible to nearby Apple devices</description>
+    <message>Authentication is required to change AWDL discoverability</message>
+    <defaults>
+      <allow_any>auth_admin</allow_any>
+      <allow_inactive>auth_admin</allow_inactive>
+      <allow_active>yes</allow_active>
+    </defaults>
+    <annotate key="org.freedesktop.policykit.exec.path">/usr/lib/omdrop/omdrop-discoverable</annotate>
+    <annotate key="org.freedesktop.policykit.exec.allow_gui">true</annotate>
+  </action>
+</policyconfig>
