@@ -1,0 +1,33 @@
+# awdl0 at boot -- the system half of the pair.
+#
+# Creates and configures awdl0 from the Wi-Fi interface once that interface
+# exists, then exits. It does NOT enable AWDL, write a template or advertise:
+# that is `omdrop-discoverable start <seconds>`, driven by the panel button, so
+# the radio only leaves the infra channel while a user has asked to be visible.
+#
+# Requires the patched brcmfmac to be loaded. With the stock driver there is no
+# AWDL iovar support and this exits 4 without touching anything.
+
+[Unit]
+Description=Create and configure awdl0 (firmware-native AWDL on BCM4387)
+Documentation=https://github.com/brentkearney/omdrop-awdl
+# The Wi-Fi interface must exist and hold its permanent MAC before awdl0 can be
+# derived from it; NetworkManager is what would otherwise randomise it.
+# awdl-up finds the interface and waits for both conditions itself, so no
+# device unit is named here: the name is not the same on every machine.
+After=NetworkManager.service
+ConditionPathExists=/sys/module/brcmfmac
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+ExecStart=/usr/lib/omdrop/awdl-up
+# awdl-up waits for the Wi-Fi interface itself; this bounds the whole attempt.
+TimeoutStartSec=180
+# Exit 4 (no Wi-Fi interface / create failed) and 5 (randomised MAC) are
+# configuration facts, not crashes: fail the unit so `systemctl status` shows
+# why, but never loop. A boot without AWDL must still be a working laptop.
+Restart=no
+
+[Install]
+WantedBy=multi-user.target

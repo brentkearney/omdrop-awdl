@@ -1,0 +1,31 @@
+# OPTIONAL, and not installed to a directory systemd reads.
+#
+# Name the Broadcom Wi-Fi interface wld0. The package does not activate this,
+# and nothing in it needs the name: awdl-up finds the interface by driver and
+# works equally well with wlan0. Renaming an interface a NetworkManager profile
+# is pinned to takes Wi-Fi down until the profile is edited, which is not a
+# thing an install should do behind someone's back.
+#
+# It is here because the rename is load-bearing on a machine that already has
+# it. If yours does, every connection profile with
+# connection.interface-name=wld0 depends on the name surviving a kernel
+# upgrade, and a `.link` file is how it survives -- a udev rule that only
+# exists in a running system does not.
+#
+# Install (root), on a machine that wants it:
+#   install -Dm644 10-wld0.link /etc/systemd/network/10-wld0.link
+#   # takes effect at the next boot, or:
+#   udevadm control --reload && udevadm trigger --action=add /sys/class/net/wlan0
+#
+# Matching on Driver rather than on a MAC address keeps the file portable. To
+# pin it to one card instead, replace [Match] with the permanent address from
+# `ip -d link show <iface>`:
+#   MACAddress=xx:xx:xx:xx:xx:xx
+
+[Match]
+Driver=brcmfmac
+Type=wlan
+
+[Link]
+Name=wld0
+NamePolicy=
