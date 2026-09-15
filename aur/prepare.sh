@@ -35,15 +35,15 @@ pkgver=$(awk -F= '/^pkgver=/ { print $2; exit }' "$root/PKGBUILD")
 import re, sys
 src, repo = open(sys.argv[1]).read(), sys.argv[2]
 
-# An AUR checkout has no patches/, userspace/ or packaging/ beside the recipe:
-# it fetches the release tarball and reads them out of it.
+# An AUR checkout has no kernel/, patches/, userspace/ or packaging/ beside the
+# recipe: it fetches the release tarball and reads them out of it. The vendored
+# kernel sources travel inside that tarball, so the recipe downloads exactly one
+# thing and never clones the kernel.
 src = re.sub(
     r"source=\((.*?)\)\nsha256sums=\((.*?)\)",
-    'source=("linux-asahi::git+https://github.com/AsahiLinux/linux.git#tag=${_asahitag}"\n'
-    f'        "$pkgname-$pkgver.tar.gz::$url/archive/v$pkgver.tar.gz")\n'
-    "# The kernel tree is a git tag, which pins itself. The tarball's checksum is\n"
-    "# filled in by `aur/prepare.sh --checksums` once the tag exists on GitHub.\n"
-    "sha256sums=('SKIP'\n            'SKIP')",
+    f'source=("$pkgname-$pkgver.tar.gz::$url/archive/v$pkgver.tar.gz")\n'
+    "# Filled in by `aur/prepare.sh --checksums` once the tag exists on GitHub.\n"
+    "sha256sums=('SKIP')",
     src, flags=re.S)
 
 # Everything that read a file next to the recipe now reads it out of the
