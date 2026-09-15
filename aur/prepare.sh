@@ -65,14 +65,33 @@ install_file=${install_file//\$\{pkgname\}/$pkgname}
 cp "$root/${install_file}" "$here/${install_file}"
 
 if [[ ${1:-} == --checksums ]]; then
-  command -v updpkgsums >/dev/null || { echo "updpkgsums needs pacman-contrib" >&2; exit 1; }
-  ( cd "$here" && updpkgsums )
+  # NOT updpkgsums: it retrieves every source, and one of them is a mirror
+  # clone of the Asahi kernel -- gigabytes, minutes, and a bare repo left
+  # behind in aur/. Only the tarball needs a checksum; the kernel source is a
+  # git tag, which pins itself and is recorded as SKIP by design.
+  url=$(awk -F= '/^url=/ { gsub(/"/, "", $2); print $2; exit }' "$root/PKGBUILD")
+  tarball="${url}/archive/v${pkgver}.tar.gz"
+  echo "hashing ${tarball}"
+  sum=$(curl -fsSL "$tarball" | sha256sum | cut -d' ' -f1)
+  [[ ${#sum} -eq 64 ]] || { echo "could not hash ${tarball}" >&2; exit 1; }
+  # Second entry only: the first is the kernel tag.
+  python3 - "$out" "$sum" <<'PY'
+import re, sys
+path, sum_ = sys.argv[1], sys.argv[2]
+text = open(path).read()
+text = re.sub(r"(sha256sums=\('SKIP'\n\s+')SKIP(')", r"\g<1>" + sum_ + r"\g<2>", text)
+open(path, "w").write(text)
+PY
 fi
 
 ( cd "$here" && makepkg --printsrcinfo > .SRCINFO )
 echo "wrote $out and $here/.SRCINFO (pkgver $pkgver)"
-grep -q "SKIP" "$here/.SRCINFO" && cat <<'MSG'
+# The kernel source is a git tag and is SKIP by design, so the warning has to
+# look at the tarball's own entry -- the second one -- not at any SKIP.
+if [[ $(awk '/^sha256sums/ { getline; print }' "$out" | tr -d " '") == SKIP ]]; then
+  cat <<'MSG'
 
 NOTE: the release tarball is still SKIP. Push the v<pkgver> tag to GitHub, then
       re-run with --checksums so the AUR recipe verifies what it downloads.
 MSG
+fi

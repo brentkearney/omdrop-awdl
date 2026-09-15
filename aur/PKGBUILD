@@ -41,7 +41,7 @@ source=("linux-asahi::git+https://github.com/AsahiLinux/linux.git#tag=${_asahita
 # The kernel tree is a git tag, which pins itself. The tarball's checksum is
 # filled in by `aur/prepare.sh --checksums` once the tag exists on GitHub.
 sha256sums=('SKIP'
-            'SKIP')
+            '41c6c25c610fd8716b90a250d2802fa0e0814bd97830d4c17993024c0b892869')
 
 prepare() {
   cd "${srcdir}/linux-asahi"
