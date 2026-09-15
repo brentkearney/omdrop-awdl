@@ -65,30 +65,29 @@ install_file=${install_file//\$\{pkgname\}/$pkgname}
 cp "$root/${install_file}" "$here/${install_file}"
 
 if [[ ${1:-} == --checksums ]]; then
-  # NOT updpkgsums: it retrieves every source, and one of them is a mirror
-  # clone of the Asahi kernel -- gigabytes, minutes, and a bare repo left
-  # behind in aur/. Only the tarball needs a checksum; the kernel source is a
-  # git tag, which pins itself and is recorded as SKIP by design.
+  # NOT updpkgsums: it runs makepkg to retrieve sources, and there is nothing
+  # to gain from that when the only source is one tarball we can hash here.
   url=$(awk -F= '/^url=/ { gsub(/"/, "", $2); print $2; exit }' "$root/PKGBUILD")
   tarball="${url}/archive/v${pkgver}.tar.gz"
   echo "hashing ${tarball}"
   sum=$(curl -fsSL "$tarball" | sha256sum | cut -d' ' -f1)
   [[ ${#sum} -eq 64 ]] || { echo "could not hash ${tarball}" >&2; exit 1; }
-  # Second entry only: the first is the kernel tag.
   python3 - "$out" "$sum" <<'PY'
 import re, sys
 path, sum_ = sys.argv[1], sys.argv[2]
 text = open(path).read()
-text = re.sub(r"(sha256sums=\('SKIP'\n\s+')SKIP(')", r"\g<1>" + sum_ + r"\g<2>", text)
+text, count = re.subn(r"sha256sums=\('SKIP'\)", f"sha256sums=('{sum_}')", text)
+if count != 1:
+    sys.exit(f"expected one SKIP checksum to replace in {path}, found {count}")
 open(path, "w").write(text)
 PY
 fi
 
 ( cd "$here" && makepkg --printsrcinfo > .SRCINFO )
 echo "wrote $out and $here/.SRCINFO (pkgver $pkgver)"
-# The kernel source is a git tag and is SKIP by design, so the warning has to
-# look at the tarball's own entry -- the second one -- not at any SKIP.
-if [[ $(awk '/^sha256sums/ { getline; print }' "$out" | tr -d " '") == SKIP ]]; then
+# The recipe downloads exactly one thing, so an unreplaced SKIP means the AUR
+# would verify nothing about the tarball it builds.
+if grep -q "sha256sums=('SKIP')" "$out"; then
   cat <<'MSG'
 
 NOTE: the release tarball is still SKIP. Push the v<pkgver> tag to GitHub, then

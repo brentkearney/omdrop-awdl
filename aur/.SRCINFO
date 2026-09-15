@@ -23,6 +23,6 @@ pkgbase = brcmfmac-awdl-dkms
 	optdepends = python-dbus: the opt-in BLE Continuity advert
 	optdepends = python-gobject: the opt-in BLE Continuity advert
 	source = brcmfmac-awdl-dkms-0.1.1.tar.gz::https://github.com/brentkearney/omdrop-awdl/archive/v0.1.1.tar.gz
-	sha256sums = SKIP
+	sha256sums = 47746373bb5402d583f0fcc9a0bef2f9e3508ed92613cd633457258af18b3e3e
 
 pkgname = brcmfmac-awdl-dkms
