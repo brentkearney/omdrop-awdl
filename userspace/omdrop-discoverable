@@ -490,6 +490,10 @@ supervise(){
       ip link set "$IF" allmulticast on 2>/dev/null
     fi
     track_election
+    # The rename lands mid-window, when the band move's reassociation makes
+    # avahi re-announce. Checking every tenth interval keeps the name back
+    # within seconds instead of leaving the host unreachable until stop.
+    if (( seq % 10 == 1 )); then mdns_reclaim; fi
     python3 "$LIB/awdl-airdrop-adv.py" --iface "$IF" --count "$ADV_COUNT" \
       --interval 0.02 --flags "$ADV_FLAGS" --seq $(( seq * 100 )) >/dev/null 2>&1
     sleep "$ADV_INTERVAL"
@@ -639,6 +643,52 @@ cmd_start(){
   exit 0
 }
 
+# --- mDNS identity ------------------------------------------------------------
+# A window moves the Wi-Fi to 2.4 GHz, which drops and re-forms the infra link,
+# and avahi re-announces on every one of those transitions. avahi also publishes
+# on awdl0, where an announcement comes back off the AWDL link; avahi reads the
+# echo as another host holding the name and renames itself -- host -> host-2
+# (observed 130913T180746, 66 mDNS frames on awdl0 in the same window).
+#
+# The rename outlives the window. Every other machine resolving <host>.local
+# gets nothing, so `ping` and `scp` to this host fail long after AirDrop is off.
+# Receiving a file must not cost the host its name on the network, so a drifted
+# name is put back wherever we touch the radio.
+mdns_want(){ cat /proc/sys/kernel/hostname 2>/dev/null; }
+
+mdns_current(){
+  command -v busctl >/dev/null 2>&1 || return 0
+  busctl --no-pager call org.freedesktop.Avahi / org.freedesktop.Avahi.Server \
+    GetHostName 2>/dev/null | sed -n 's/^s "\(.*\)"$/\1/p'
+}
+
+# Only ever undoes avahi's own conflict rename: the name must be exactly ours
+# with avahi's numeric suffix. A deliberately different mDNS name -- someone who
+# set one on purpose -- does not match, and is left alone.
+mdns_reclaim(){
+  local want cur
+  want=$(mdns_want); cur=$(mdns_current)
+  [[ -n ${want:-} && -n ${cur:-} && $cur != "$want" ]] || return 0
+  [[ $want =~ ^[A-Za-z0-9-]+$ ]] || return 0
+  [[ $cur =~ ^${want}-[0-9]+$ ]] || return 0
+  command -v avahi-set-host-name >/dev/null 2>&1 || return 0
+  avahi-set-host-name "$want" >/dev/null 2>&1 \
+    && log "reclaimed the mDNS name $want.local (avahi had renamed it $cur.local)"
+}
+
+# Watch for up to $1 seconds. The band move at teardown reassociates after we
+# return, so a single check at stop can run before the rename it needs to undo.
+cmd_mdns_reclaim(){
+  need_root mdns-reclaim
+  local secs=${1:-0} i
+  mdns_reclaim
+  for (( i = 0; i < secs; i += 2 )); do
+    sleep 2
+    mdns_reclaim
+  done
+  exit 0
+}
+
 cmd_stop(){
   need_root stop
   mkdir -p "$RUN"
@@ -656,6 +706,7 @@ cmd_stop(){
   done
   rm -f "$RUN/until" "$RUN/supervisor"
   printf stopped > "$RUN/reason"
+  mdns_reclaim
   log "stopped"
   exit 0
 }
@@ -813,6 +864,7 @@ case "${1:-}" in
   peers)  cmd_peers ;;
   diag)   shift; cmd_diag "$@" ;;
   read)   shift; cmd_read "$@" ;;
+  mdns-reclaim) shift; cmd_mdns_reclaim "$@" ;;
   __supervise) need_root; supervise "$2" "$3" ;;
-  *) printf 'usage: %s start <seconds> | stop | status [--json] | peers | diag [seconds] | read <iovar> [len]\n' "$0" >&2; exit 2 ;;
+  *) printf 'usage: %s start <seconds> | stop | status [--json] | peers | diag [seconds] | read <iovar> [len] | mdns-reclaim [seconds]\n' "$0" >&2; exit 2 ;;
 esac
