@@ -53,7 +53,7 @@ _asahicommit=13aba96fb344feb5708d998c54331a719431a3db
 # would leave a modified tree in the checkout and make a second build fail.
 source=("$pkgname-$pkgver.tar.gz::$url/archive/v$pkgver.tar.gz")
 # Filled in by `aur/prepare.sh --checksums` once the tag exists on GitHub.
-sha256sums=('SKIP')
+sha256sums=('47746373bb5402d583f0fcc9a0bef2f9e3508ed92613cd633457258af18b3e3e')
 
 prepare() {
   rm -rf "${srcdir}/kernel"
