@@ -6,7 +6,6 @@ pkgbase = brcmfmac-awdl-dkms
 	install = brcmfmac-awdl-dkms.install
 	arch = aarch64
 	license = GPL-2.0-only
-	makedepends = git
 	depends = dkms
 	depends = bash
 	depends = python
@@ -23,9 +22,7 @@ pkgbase = brcmfmac-awdl-dkms
 	optdepends = bluez: the opt-in BLE Continuity advert
 	optdepends = python-dbus: the opt-in BLE Continuity advert
 	optdepends = python-gobject: the opt-in BLE Continuity advert
-	source = linux-asahi::git+https://github.com/AsahiLinux/linux.git#tag=asahi-7.1.13-2
 	source = brcmfmac-awdl-dkms-0.1.0.tar.gz::https://github.com/brentkearney/omdrop-awdl/archive/v0.1.0.tar.gz
 	sha256sums = SKIP
-	sha256sums = 41c6c25c610fd8716b90a250d2802fa0e0814bd97830d4c17993024c0b892869
 
 pkgname = brcmfmac-awdl-dkms

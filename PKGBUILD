@@ -21,7 +21,7 @@ license=('GPL-2.0-only')
 # session invoke the one helper that needs root.
 depends=('dkms' 'bash' 'python' 'iproute2' 'iputils' 'kmod' 'polkit'
          'procps-ng' 'util-linux' 'systemd')
-makedepends=('git')
+makedepends=()        # prepare() patches with patch(1), which base-devel has
 optdepends=('linux-asahi-headers: build against the Asahi kernel'
             'networkmanager: keeps awdl0 unmanaged and settles the Wi-Fi MAC before awdl0 is derived from it'
             'opendrop: the AirDrop receiver the omdrop plugin runs on top of this (AUR; there is no python-opendrop)'
@@ -30,26 +30,44 @@ optdepends=('linux-asahi-headers: build against the Asahi kernel'
             'python-gobject: the opt-in BLE Continuity advert')
 install="${pkgname}.install"
 
-# Pinned deliberately. The patches were developed against this tag; a newer
-# Asahi tree may need them rebased, and silently building against whatever is
-# current would turn a rebase conflict into a runtime surprise.
-source=("linux-asahi::git+https://github.com/AsahiLinux/linux.git#tag=${_asahitag}"
-        'dkms.conf.in'
-        'patches/'
-        'userspace/'
-        'packaging/')
-sha256sums=('SKIP' 'SKIP' 'SKIP' 'SKIP' 'SKIP')
+# The three directories DKMS actually compiles, vendored pristine from Asahi's
+# tree at ${_asahitag} (commit ${_asahicommit}) under kernel/. 1.4 MB.
+#
+# This used to be `git+https://github.com/AsahiLinux/linux.git#tag=...`, which
+# makepkg fetches as a full mirror clone -- the entire kernel history, several
+# GB over the network -- to read 1.4 MB of it and throw the rest away. The
+# module is compiled later by DKMS against the installed kernel headers, never
+# against that tree, so nothing outside these directories was ever used.
+#
+# Re-vendor with:
+#   git archive <tag> drivers/net/wireless/broadcom/brcm80211/{brcmfmac,brcmutil,include} | tar -x -C kernel
+# and re-check the patches. Keeping the kernel path prefix is what lets them
+# apply with -p1 exactly as they would upstream.
+_asahicommit=13aba96fb344feb5708d998c54331a719431a3db
+# makepkg's source array takes files, not directories, so the vendored tree and
+# the rest of the checkout are read from ${startdir} the way they always were.
+# prepare() copies the kernel sources into ${srcdir} first: patching in place
+# would leave a modified tree in the checkout and make a second build fail.
+source=('dkms.conf.in')
+sha256sums=('SKIP')
 
 prepare() {
-  cd "${srcdir}/linux-asahi"
+  rm -rf "${srcdir}/kernel"
+  cp -a "${startdir}/kernel" "${srcdir}/kernel"
+  cd "${srcdir}/kernel"
+  # patch(1), NOT `git apply`: this builds inside a git clone (the plugin's
+  # installer clones this repo and runs makepkg in it), and `git apply`
+  # resolves paths against the enclosing repository's root rather than the
+  # working directory. It then reports success having changed nothing, and the
+  # package ships pristine sources -- a driver with no AWDL in it.
   for p in "${startdir}"/patches/*.patch; do
     echo "applying ${p##*/}"
-    git apply "$p"
+    patch -p1 --forward --silent -i "$p"
   done
 }
 
 package() {
-  local src="${srcdir}/linux-asahi/drivers/net/wireless/broadcom/brcm80211"
+  local src="${srcdir}/kernel/drivers/net/wireless/broadcom/brcm80211"
   local dest="${pkgdir}/usr/src/brcmfmac-awdl-${pkgver}"
 
   # Sources go at the ROOT of /usr/src/<pkg>-<ver>/, beside dkms.conf: DKMS

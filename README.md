@@ -32,7 +32,7 @@ cd omdrop-awdl
 makepkg -si
 ```
 
-`makepkg` clones the Asahi kernel at the pinned tag, so the first build downloads a full kernel tree and takes a while.
+The build is offline and takes seconds: the three kernel directories DKMS compiles are vendored in `kernel/` (1.4 MB, pristine from the pinned Asahi tag — see [kernel/PROVENANCE.md](kernel/PROVENANCE.md)), and the patches are applied to a copy of them at build time.
 
 Then reboot, or reload the driver when the link can go down for a minute:
 
@@ -105,7 +105,7 @@ Patch 0008 is an ordinary kernel bug fix with no AWDL dependency, and stands on 
 
 ## Maintenance
 
-The patches are against **`asahi-7.1.13-2`**, matching `linux-asahi 7.1.13.asahi2-1`, and the `PKGBUILD` pins that tag. The pin is deliberate: a newer tree may need them rebased, and building against whatever happens to be current would turn a rebase conflict into a runtime surprise.
+The patches are against **`asahi-7.1.13-2`** (commit `13aba96f`), matching `linux-asahi 7.1.13.asahi2-1`, and that is the tree vendored in `kernel/`. The pin is deliberate: a newer tree may need them rebased, and building against whatever happens to be current would turn a rebase conflict into a runtime surprise. [kernel/PROVENANCE.md](kernel/PROVENANCE.md) has the re-vendoring sequence.
 
 They touch twelve files, all under `drivers/net/wireless/broadcom/brcm80211/brcmfmac/`. Nothing outside that directory.
 
