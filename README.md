@@ -34,6 +34,8 @@ makepkg -si
 
 The build is offline and takes seconds: the three kernel directories DKMS compiles are vendored in `kernel/` (1.4 MB, pristine from the pinned Asahi tag — see [kernel/PROVENANCE.md](kernel/PROVENANCE.md)), and the patches are applied to a copy of them at build time.
 
+Not on the AUR: it is an x86_64 index, and no Apple Silicon kernel package lives there. The recipe Omarchy's own package repository builds is generated into [omarchy-pkgs/](omarchy-pkgs/) from the `PKGBUILD` above, so there is one source of truth for how this package is built.
+
 Then reboot, or reload the driver when the link can go down for a minute:
 
 ```bash
