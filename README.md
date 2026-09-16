@@ -20,7 +20,12 @@ This is the driver half of an upcoming "Omdrop" plugin for [Omarchy M](https://g
 
 ## Hardware
 
-Developed on **BCM4387** (`14e4:4433`) in a MacBook Pro 16-inch, M1 Pro, running Asahi Linux. Other Apple Broadcom parts are plausible and untested.
+Developed on **BCM4387** (`14e4:4433`) in a MacBook Pro 16-inch, M1 Pro, running Asahi Linux. Other Apple Broadcom parts are plausible and untested. Apple models that ship with the BCM4387:
+ - MacBook Pro 14" and 16", 2021 — M1 Pro / M1 Max (j314/j316, t600x)
+ - Mac Studio, 2022 — M1 Max / M1 Ultra (j375)
+ - MacBook Air 13", 2022 — M2 (j413)
+ - MacBook Pro 13", 2022 — M2 (j493)
+ - Mac mini, 2023 — M2 (j473) [INFERENCE]
 
 This will not work on Intel, MediaTek or Qualcomm Wi-Fi. The approach depends on the firmware already implementing AWDL; the patches configure it rather than providing it. If you want AirDrop on non-Apple hardware, look at [owl](https://github.com/seemoo-lab/owl) and [OpenDrop](https://github.com/seemoo-lab/opendrop), which reimplement AWDL in userspace over monitor mode.
 
