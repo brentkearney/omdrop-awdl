@@ -1,0 +1,205 @@
+#!/usr/bin/env python3
+"""Resolve an AWDL peer's AirDrop endpoint: SRV from its action frames, address
+from mDNS.
+
+Why this exists. A peer's action frames carry the AirDrop service as PTR + SRV
++ TXT and **no AAAA** -- measured 2026-09-18, 5,011 records from an iPhone and
+6,504 from a Mac, none containing an address record. The SRV names a host
+(`<uuid>.local`) and nothing in the advert says what it resolves to.
+
+Deriving the address from the frame's source MAC works for a Mac: hume's own
+reported `fe80::e09d:3ff:fe6c:5823` matched the derivation exactly and two
+transfers landed on it. It does NOT work for an iPhone: the phone advertised
+`_airdrop._tcp` on 8770 and a TCP connect to its derived address was refused,
+so the frame source MAC and the service address are different identifiers
+there.
+
+So ask. A multicast mDNS AAAA query on awdl0 for the SRV target gets the
+address from the device that owns the name.
+
+  tools/awdl-resolve --af-log FILE                 # every peer it can resolve
+  tools/awdl-resolve --af-log FILE --mac aa:bb:..  # one peer
+  tools/awdl-resolve --name 12a5f524-....local     # resolve a name directly
+
+Capturing action frames needs root; this does not. Feed it a log from
+`awdl-af-listen awdl0`.
+"""
+import argparse
+import importlib
+import ipaddress
+import os
+import socket
+import struct
+import sys
+import time
+
+TOOLS = os.path.dirname(os.path.abspath(__file__))
+sys.path.insert(0, TOOLS)
+MDNS_GROUP = "ff02::fb"
+MDNS_PORT = 5353
+IFACE = "awdl0"
+
+
+def endpoints(af_log, want_mac=None):
+    """Newest AirDrop SRV per peer MAC, from awdl-af-listen output."""
+    afp = importlib.import_module("awdl-af-parse")
+    out = {}
+    with open(af_log) as f:
+        for line in f:
+            parts = line.split()
+            if len(parts) < 4:
+                continue
+            if want_mac and parts[2].lower() != want_mac.lower():
+                continue
+            try:
+                rec = afp.parse_body(bytes.fromhex(parts[3]))
+            except Exception:
+                continue
+            if not rec:
+                continue
+            ep = afp.airdrop_endpoint(rec)
+            if ep and ep.get("port") and ep.get("target"):
+                out[parts[2]] = dict(ep, ts=float(parts[0]), sa=parts[2])
+    return sorted(out.values(), key=lambda e: -e["ts"])
+
+
+def query(name, qtype=28):
+    """One mDNS question. QU bit set: an answer may come back unicast."""
+    labels = b"".join(bytes([len(p)]) + p.encode() for p in name.split(".") if p) + b"\x00"
+    return (struct.pack(">HHHHHH", 0, 0, 1, 0, 0, 0) + labels
+            + struct.pack(">HH", qtype, 0x8001))
+
+
+def read_name(buf, off):
+    parts = []
+    while True:
+        length = buf[off]
+        if length == 0:
+            return ".".join(parts), off + 1
+        if length & 0xC0 == 0xC0:
+            ptr = struct.unpack_from(">H", buf, off)[0] & 0x3FFF
+            sub, _ = read_name(buf, ptr)
+            parts.append(sub)
+            return ".".join(parts), off + 2
+        parts.append(buf[off + 1:off + 1 + length].decode("utf-8", "replace"))
+        off += 1 + length
+
+
+def addresses(buf, wanted):
+    """Every AAAA in a response whose owner name matches, link-local first."""
+    found = []
+    try:
+        counts = struct.unpack_from(">HHHHHH", buf, 0)
+        off = 12
+        for _ in range(counts[2]):                     # questions
+            _, off = read_name(buf, off)
+            off += 4
+        for _ in range(counts[3] + counts[4] + counts[5]):
+            owner, off = read_name(buf, off)
+            rtype, _cls, _ttl, dlen = struct.unpack_from(">HHIH", buf, off)
+            off += 10
+            if rtype == 28 and dlen == 16 and owner.lower().rstrip(".") == wanted:
+                found.append(str(ipaddress.IPv6Address(buf[off:off + 16])))
+            off += dlen
+    except (struct.error, IndexError):
+        pass
+    return sorted(found, key=lambda a: not a.startswith("fe80"))
+
+
+def resolve(name, seconds=4.0, source=None):
+    """Address for an AWDL peer's SRV target.
+
+    avahi first: it already queries and publishes on awdl0, and it owns UDP
+    5353, which a second querier cannot bind for multicast answers. Measured
+    2026-09-18 it resolves both an iPhone's and a Mac's AirDrop host name, and
+    the iPhone's answer matched the EUI-64 derivation exactly -- so the address
+    was never the reason a phone refuses TCP on 8770.
+    """
+    name = name.rstrip(".")
+    import shutil
+    import subprocess
+    if shutil.which("avahi-resolve"):
+        try:
+            out = subprocess.run(["avahi-resolve", "-n", name], capture_output=True,
+                                 text=True, timeout=max(seconds, 2.0)).stdout.split()
+        except subprocess.TimeoutExpired:
+            out = []                      # a name avahi has not cached yet
+        got = [a for a in out[1:] if ":" in a]
+        if got:
+            return sorted(got, key=lambda a: not a.startswith("fe80"))
+    return resolve_by_query(name, seconds)
+
+
+def resolve_by_query(name, seconds=4.0):
+    """Ask on awdl0 ourselves. Only reachable when nothing else owns 5353."""
+    name = name.rstrip(".")
+    idx = socket.if_nametoindex(IFACE)
+    s = socket.socket(socket.AF_INET6, socket.SOCK_DGRAM)
+    s.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+    s.setsockopt(socket.IPPROTO_IPV6, socket.IPV6_MULTICAST_IF, struct.pack("I", idx))
+    s.setsockopt(socket.IPPROTO_IPV6, socket.IPV6_MULTICAST_HOPS, 1)
+    # Joining the group is what makes a multicast ANSWER reach us; Apple
+    # devices answer a QU query unicast, but not always.
+    mreq = socket.inet_pton(socket.AF_INET6, MDNS_GROUP) + struct.pack("I", idx)
+    try:
+        s.bind(("", MDNS_PORT))
+        s.setsockopt(socket.IPPROTO_IPV6, socket.IPV6_JOIN_GROUP, mreq)
+    except OSError:
+        s.bind(("", 0))                                # 5353 busy: unicast replies only
+    s.settimeout(0.5)
+    dest = (MDNS_GROUP + "%" + IFACE, MDNS_PORT)
+    addr = socket.getaddrinfo(dest[0], dest[1], socket.AF_INET6, socket.SOCK_DGRAM)[0][4]
+
+    found, deadline, asked = [], time.monotonic() + seconds, 0.0
+    while time.monotonic() < deadline:
+        if time.monotonic() - asked > 1.0:             # re-ask once a second
+            s.sendto(query(name), addr)
+            asked = time.monotonic()
+        try:
+            buf, src = s.recvfrom(4096)
+        except socket.timeout:
+            continue
+        for a in addresses(buf, name.lower()):
+            if a not in found:
+                found.append(a)
+        if found:
+            break
+    s.close()
+    return found
+
+
+def main():
+    ap = argparse.ArgumentParser(description=__doc__,
+                                 formatter_class=argparse.RawDescriptionHelpFormatter)
+    ap.add_argument("--af-log", help="awdl-af-listen output to read SRVs from")
+    ap.add_argument("--mac", help="only this peer")
+    ap.add_argument("--name", help="resolve this name instead of reading a log")
+    ap.add_argument("--seconds", type=float, default=4.0)
+    args = ap.parse_args()
+
+    if args.name:
+        got = resolve(args.name, args.seconds)
+        print("\n".join(got) if got else f"no AAAA for {args.name} in {args.seconds}s")
+        return 0 if got else 1
+
+    if not args.af_log:
+        ap.error("--af-log or --name is required")
+    eps = endpoints(args.af_log, args.mac)
+    if not eps:
+        print("no AirDrop SRV in that log", file=sys.stderr)
+        return 2
+    rc = 1
+    for ep in eps:
+        got = resolve(ep["target"], args.seconds)
+        where = f"[{got[0]}%{IFACE}]:{ep['port']}" if got else "unresolved"
+        print(f"{ep['sa']}  id={ep['id']}  target={ep['target']}  {where}")
+        if len(got) > 1:
+            for extra in got[1:]:
+                print(f"    also {extra}")
+        if got:
+            rc = 0
+    return rc
+
+
+if __name__ == "__main__":
+    sys.exit(main())
