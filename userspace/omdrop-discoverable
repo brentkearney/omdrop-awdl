@@ -106,11 +106,25 @@ driver_loaded(){ [[ -d /sys/module/brcmfmac ]]; }
 # completions the firmware logs. A parked firmware parses PSFs, fills its peer
 # table and elects normally while transmitting nothing, so peer state, opmode
 # and outstanding_tx all look healthy in both cases. >=15 of 20 = live.
+#
+# Those completions are exactly what `awdl_trace` gates, and it is off by
+# default -- so the probe turns it on for its own three seconds and puts it
+# back. Without this the gate reads 0 completions on a perfectly healthy radio
+# and every window fails as parked (2026-09-18: that is what happened for
+# twenty minutes after the parameter shipped).
+TRACE=/sys/module/brcmfmac/parameters/awdl_trace
 probe_completions(){
+  local was= n
+  if [[ -w $TRACE ]]; then was=$(cat "$TRACE" 2>/dev/null); printf 1 > "$TRACE"; fi
   dmesg -C
-  python3 "$LIB/awdl-airdrop-adv.py" --iface "$IF" --count 20 --interval 0.02 --seq 9000 >/dev/null 2>&1 || return 1
+  if ! python3 "$LIB/awdl-airdrop-adv.py" --iface "$IF" --count 20 --interval 0.02 --seq 9000 >/dev/null 2>&1; then
+    [[ -n $was ]] && printf '%s' "$was" > "$TRACE"
+    return 1
+  fi
   sleep 3
-  dmesg | awk '/awdl txstatus/' | grep -c 'tx_status=0x' || true
+  n=$(dmesg | awk '/awdl txstatus/' | grep -c 'tx_status=0x' || true)
+  [[ -n $was ]] && printf '%s' "$was" > "$TRACE"
+  printf '%s' "$n"
 }
 
 # Data frames delivered, sampled rather than waited for. The completions probe
