@@ -111,6 +111,40 @@ reconfigure_or_skip(){
   log "schedule re-applied to the existing $IF"
 }
 
+# What the radio is allowed to do after a reload, reported rather than changed.
+#
+# A fresh wiphy reports `country 99: DFS-UNSET`, which reads alarming and was
+# long blamed for 5 GHz failing to come back. Measured 2026-09-18, it is not
+# the cause: brcmfmac sets REGULATORY_CUSTOM_REG and ignores the boot-time
+# "00" hint, so the label is its own custom domain, while the FIRMWARE carries
+# a real country (US, rev 110 on this machine). UNII-1 and UNII-3 come back
+# immediately at 23 and 30 dBm; only the 16 DFS channels are no-IR, which is
+# correct behaviour everywhere.
+#
+# `iw reg set` cannot change it: the notifier reads the country iovar, then
+# brcmf_translate_country_code has no table to translate against and returns
+# without setting anything. Verified -- the wiphy stayed at 99 and the firmware
+# stayed at US.
+#
+# So this logs the three facts a 5 GHz complaint needs and changes nothing:
+# what the firmware enforces, what the wiphy advertises, and how many 5 GHz
+# channels are held back.
+regdom_report(){
+  local cc rev phy dfs out=/run/awdl-up.country
+  # The station interface, not awdl0: this runs mid-reload, before awdl0 has
+  # been created, and the country is a per-radio setting either way.
+  rm -f "$out"
+  if timeout 8 python3 "$LIB/brcm_iovar.py" -i "$STA" get country -l 12 \
+       --raw "$out" >/dev/null 2>&1 && [[ -s $out ]]; then
+    cc=$(head -c 2 "$out" | tr -d '\0')
+    rev=$(od -An -tu4 -j4 -N4 "$out" | tr -d ' ')
+  fi
+  phy=$(iw reg get 2>/dev/null | awk '/^phy#/{getline; print $2 " " $3; exit}')
+  dfs=$(iw phy "phy$(iw dev "$STA" info 2>/dev/null | awk '/wiphy/{print $2}')" info 2>/dev/null \
+        | awk '/^\s+\* [0-9]{4}\.[0-9] MHz/ && $2+0 > 5000 && $2+0 < 6000' | grep -c 'no IR')
+  log "regulatory: firmware ${cc:-?} rev ${rev:-?}, wiphy ${phy:-?}, ${dfs:-?} of the 5 GHz channels no-IR (DFS)"
+}
+
 # --reload: the only way to change chan_seq once a window has run. A PSF
 # template persists in the firmware until the module is unloaded, and `awdl=0`
 # with one loaded hung the firmware once -- so reconfiguring safely means
@@ -131,6 +165,7 @@ reload_driver(){
   log "brcmfmac reloaded; waiting for the Wi-Fi interface"
   wait_sta || { log "no Wi-Fi interface ${WAIT_STA}s after reload"; return 4; }
   log "$STA back"
+  regdom_report
   return 0
 }
 
