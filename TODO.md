@@ -9,7 +9,7 @@ Each section separates what was observed from what is still unknown. Where a fin
 1. ~~[Receive with the Wi-Fi link on 5 GHz](#1-receive-with-the-wi-fi-link-on-5-ghz)~~ ✅ Done!
 2. [Sending has never completed over AWDL](#2-sending-has-never-completed-over-awdl)
 3. ~~[The regulatory domain is not reapplied to a fresh wiphy](#3-the-regulatory-domain-is-not-reapplied-to-a-fresh-wiphy)~~ ✅ Done!
-4. [`awdl0` loses `IFF_UP` across an `awdl=0/1` cycle](#4-awdl0-loses-iff_up-across-an-awdl01-cycle)
+4. ~~[`awdl0` loses `IFF_UP` across an `awdl=0/1` cycle](#4-awdl0-loses-iff_up-across-an-awdl01-cycle)~~ ✅ Done!
 5. [`awdl=0` with a PSF template loaded wedges the firmware](#5-awdl0-with-a-psf-template-loaded-wedges-the-firmware)
 6. ~~[The instrumentation logs unconditionally](#6-the-instrumentation-logs-unconditionally)~~ ✅ Done!
 7. [The kernel tag is pinned](#7-the-kernel-tag-is-pinned)
@@ -73,19 +73,26 @@ Each section separates what was observed from what is still unknown. Where a fin
 - Which band NetworkManager lands on after a reload varies — channel 44 on one reload, 2412 MHz on the next, same AP. That is client/AP band steering, not regulatory, and it is the only part of the original complaint still unexplained.
 - The firmware enforces `US` on a machine whose system domain is `CA`. The two differ in the 5600–5650 MHz weather-radar band. Worth a deliberate decision rather than a silent write: the package does not set a country today.
 
-## 4. `awdl0` loses `IFF_UP` across an `awdl=0/1` cycle
+## 4. ~~`awdl0` loses `IFF_UP` across an `awdl=0/1` cycle~~ ✅ Done!
 
 #### What we know
 
-- Each disable drops the netdev and nothing raises it again. Userspace currently re-asserts the link after every toggle.
-- The resulting state is convincingly disguised: the firmware transmits normally with action-frame counters climbing, while the interface has no `IFF_UP`, no link-local, and nothing can bind to it. A radio in this state looks alive by every counter and dead by every test.
-- Three of the void 5 GHz trials above were this bug, and its symptoms were read as a coexistence failure.
+- **Closed by measurement: `IFF_UP` is never lost.** Only `dev_close()` can clear that flag, and no AWDL path calls it.
+- Measured 2026-09-18 from a quiet radio, `awdl=0` then `awdl=1`, no template loaded:
+
+```
+before         <NO-CARRIER,BROADCAST,MULTICAST,UP>  carrier=0  link_locals=0
+after_disable  <NO-CARRIER,BROADCAST,MULTICAST,UP>  carrier=0  link_locals=0
+after_enable   <BROADCAST,MULTICAST,UP,LOWER_UP>    carrier=1  link_locals=1
+```
+
+- The enable restores carrier **and** the link-local by itself; nothing ran `ip link set up`.
+- Repeated from a live radio (carrier up, link-local present): both transitions changed nothing at all.
+- What the original report saw was `operstate down` with `NO-CARRIER` and no link-local, read as "not UP". `brcmf_netdev_open_awdl` ends in `netif_carrier_off()` deliberately — carrier stays off until AWDL is running.
+- The netdev teardown that did exist was fixed by patch 0005: `brcmf_awdl_del_vif()` called `brcmf_remove_interface()` under the wiphy mutex without RTNL, which tore the interface down and deadlocked `ip(8)` and NetworkManager in D state. Teardown now defers to the `BRCMF_E_IF_DEL` worker.
+- The product never reaches this path anyway: a window always has a PSF template loaded by the time the gate runs, and the gate refuses `awdl=0` with one present (`no awdl=0 retoggle (023513Z)` on every start). Toggling is a hand operation.
 - `awdl0`'s `rx_packets` counts **data** frames only. Action frames — what discovery runs on — never increment it, so "tx 619, rx 0" reads as total deafness while the driver is taking about eight action frames a second from a peer.
-
-#### Open questions
-
-- Should the driver preserve interface state across an `awdl` toggle, or is dropping the netdev the intended contract with userspace expected to re-raise it?
-- Is the drop the firmware's doing or the driver's?
+- The userspace link re-assertion stays: it costs nothing on a healthy link and still covers an infra reassociation dropping `awdl0` mid-window, which is a different fault and a real one.
 
 ## 5. `awdl=0` with a PSF template loaded wedges the firmware
 
