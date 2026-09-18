@@ -120,7 +120,7 @@ The debug build is not a leftover. The data-path gate counts per-frame `awdl txs
 
 ### Contributions & WIP
 
-Contributions are welcome - feel free to post Issues and PRs. See the [TODO.md](TODO.md) file for a list of the work left to do.
+Contributions are welcome - feel free to post Issues and PRs. See [issue #8](https://github.com/brentkearney/omdrop-awdl/issues/8) for the work left to do.
 
 The two largest gaps: receive is stable only with the Wi-Fi link on 2.4 GHz, and there is no send mode yet. Testers on Apple Broadcom parts other than BCM4387 are also useful.
 
