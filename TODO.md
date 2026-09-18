@@ -15,7 +15,7 @@ Each section separates what was observed from what is still unknown. Where a fin
 7. [The kernel tag is pinned](#7-the-kernel-tag-is-pinned)
 8. [Only BCM4387 has been tested](#8-only-bcm4387-has-been-tested)
 9. [Power cost is unmeasured](#9-power-cost-is-unmeasured)
-10. [An active receive window cannot be rescheduled](#10-an-active-receive-window-cannot-be-rescheduled)
+10. ~~[An active receive window cannot be rescheduled](#10-an-active-receive-window-cannot-be-rescheduled)~~ ✅ Done!
 
 ## 1. Receive with the Wi-Fi link on 5 GHz
 
@@ -157,15 +157,12 @@ country 99: DFS-UNSET
 - What does an idle discoverable window cost in battery?
 - Does that answer change what a sensible default window length is?
 
-## 10. An active receive window cannot be rescheduled
+## 10. ~~An active receive window cannot be rescheduled~~ ✅ Done!
 
 #### What we know
 
-- **Stay visible for** currently selects the next receive window. Moving it while Omdrop is active does not change the running window.
-- Changing the selection while Omdrop is active should reset the running window from that moment. For example, choosing **10 minutes** should leave 10 minutes, not preserve the previous deadline or subtract time already elapsed.
-- The root radio helper already supports replacing a live deadline when `start` is called again. The plugin still needs to reschedule its user timer and keep the panel, receiver, watcher, and radio on one deadline.
-
-#### Open questions
-
-- How should the two non-timed endpoints behave mid-window: should **One file, then off** replace the timer with the one-file watcher, and should **Until I turn it off** remove the timer immediately?
-- If rescheduling either the user timer or the root radio deadline fails, which existing deadline should remain authoritative and what should the panel report?
+- Moving **Stay visible for** during a live window resets that window to the new selection, counting from the moment of the change.
+- The panel shows the stop you are landing on while your hand is on the slider, and a status poll can no longer move the handle mid-drag.
+- Verified live across every stop: 10 minutes, 1 minute, **One file, then off**, **Until I turn it off**, then 30 minutes. The radio's deadline tracks the user timer to within two seconds.
+- The answers to the questions this item opened: **One file, then off** removes the timer and re-arms the watcher with `--once`; **Until I turn it off** removes the timer and leaves the radio unbounded; a reschedule that fails leaves the existing deadline authoritative and surfaces the refusal in the panel.
+- A timed window's clock starts when receiving actually works, not when the button is pressed. The shape of the window is declared on the watcher unit so `status` can name it during the radio gate, when no deadline exists yet.
