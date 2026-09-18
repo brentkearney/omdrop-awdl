@@ -1,0 +1,102 @@
+#!/bin/bash
+# Do the AWDL patches still apply to a newer Asahi kernel tree?
+#
+# The PKGBUILD pins one tag deliberately: on hardware whose only network is the
+# thing being patched, an unpinned build turns a rebase conflict into a runtime
+# surprise. The cost of a pin is not knowing what the next tag breaks -- which
+# is what this answers, without moving the pin.
+#
+#   tests/check-patch-drift                 # against the next tag after the pin
+#   tests/check-patch-drift asahi-7.1.14-1  # against a tag you name
+#
+# Fetches only the three vendored directories (sparse, blobless, depth 1), dry
+# runs every patch in patches/, and reports each one. Nothing is written to the
+# repository; the clone lands in a temporary directory and is removed.
+set -uo pipefail
+
+repo=$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)
+pinned=$(sed -n 's/^_asahitag=//p' "$repo/PKGBUILD")
+paths=drivers/net/wireless/broadcom/brcm80211
+
+want=${1:-}
+if [[ -z $want ]]; then
+  # The next release-style tag after the pin, by version order.
+  want=$(git ls-remote --tags https://github.com/AsahiLinux/linux.git 2>/dev/null \
+         | awk -F'refs/tags/' '{print $2}' | grep -E '^asahi-[0-9]' | grep -v '\^{}' \
+         | sort -V | awk -v p="$pinned" 'p == prev { print; exit } { prev = $0 }')
+  [[ -n $want ]] || { echo "no tag newer than $pinned"; exit 0; }
+fi
+
+echo "pinned:  $pinned"
+echo "testing: $want"
+echo
+
+tmp=$(mktemp -d) || exit 1
+trap 'rm -rf "$tmp"' EXIT
+
+if ! git clone --quiet --filter=blob:none --no-checkout --depth 1 \
+       --branch "$want" https://github.com/AsahiLinux/linux.git "$tmp/linux" 2>/dev/null; then
+  echo "could not fetch $want (does the tag exist?)"
+  exit 1
+fi
+git -C "$tmp/linux" sparse-checkout set --no-cone "$paths" >/dev/null 2>&1
+git -C "$tmp/linux" checkout --quiet "$want" -- "$paths" 2>/dev/null \
+  || git -C "$tmp/linux" checkout --quiet 2>/dev/null
+
+# Applied for real, in order, each on top of the last: 0008 patches a file 0007
+# has already changed, and 0010-0012 depend on code 0009 adds. Dry running each
+# patch against pristine sources reports conflicts that do not exist.
+fail=0
+total=$(ls "$repo"/patches/*.patch | wc -l)
+for p in "$repo"/patches/*.patch; do
+  out=$(patch -p1 --forward -d "$tmp/linux" -i "$p" 2>&1); rc=$?
+  if (( rc == 0 )) && ! grep -q FAILED <<<"$out"; then
+    fuzzed=$(grep -c 'with fuzz' <<<"$out")
+    moved=$(grep -c 'offset -\?[0-9]' <<<"$out")
+    printf 'applies   %s' "${p##*/}"
+    (( fuzzed || moved )) && printf ' (%d fuzzed, %d offset)' "$fuzzed" "$moved"
+    printf '\n'
+  else
+    printf 'CONFLICTS %s\n' "${p##*/}"
+    grep -E 'FAILED|Hunk #' <<<"$out" | sed 's/^/          /'
+    fail=$(( fail + 1 ))
+  fi
+done
+
+echo
+if (( fail )); then
+  echo "$fail of $total patches need a rebase for $want"
+  echo "The pin stays until they are rebased AND retested on hardware."
+  exit 1
+fi
+echo "all $total patches apply to $want"
+
+# Applying is not compiling, and compiling is not working. The build here is
+# against the RUNNING kernel's headers, which is what DKMS does -- so it
+# answers "would this package build on this machine from the newer sources",
+# not "does the newer kernel like it".
+if [[ ${BUILD:-0} == 1 ]]; then
+  hdr=/usr/lib/modules/$(uname -r)/build
+  if [[ ! -d $hdr ]]; then
+    echo "no kernel headers at $hdr; skipping the build"
+    exit 0
+  fi
+  src=$tmp/build
+  mkdir -p "$src"
+  cp -r "$tmp/linux/$paths"/{brcmfmac,brcmutil,include} "$src/"
+  printf 'obj-m += brcmfmac/\nobj-m += brcmutil/\n' > "$src/Makefile"
+  echo "building against $(uname -r) headers"
+  if make -C "$hdr" M="$src" modules -j"$(nproc)" >"$tmp/build.log" 2>&1; then
+    echo "builds clean; $(grep -c 'warning:' "$tmp/build.log") warnings"
+    grep -q 'awdl_trace' <(modinfo "$src/brcmfmac/brcmfmac.ko" 2>/dev/null) \
+      && echo "awdl_trace present in the built module"
+  else
+    echo "BUILD FAILED against $(uname -r):"
+    grep -E 'error:|Error' "$tmp/build.log" | head -10 | sed 's/^/          /'
+    exit 1
+  fi
+fi
+
+echo
+echo "Applying and building are not the same as working: retest a transfer on"
+echo "hardware before moving the pin in PKGBUILD."
