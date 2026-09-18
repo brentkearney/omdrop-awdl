@@ -70,13 +70,62 @@ pkexec /usr/lib/omdrop/omdrop-discoverable stop
 | `/usr/lib/omdrop/omdrop-discoverable` | Opens and closes a bounded discoverability window: data-path gate, PSF template, announcer, mDNS responder, peer registration |
 | `/usr/lib/omdrop/awdl-up` | Creates and configures `awdl0`; run at boot by `awdl0.service` |
 | `/usr/lib/omdrop/*.py` | The iovar, frame-building and decoding helpers the two above call |
+| `/usr/lib/omdrop/send-to-peer` | Sends a file to a peer: reads the firmware peer table, derives the endpoint, dials it |
+| `/usr/lib/omdrop/awdl-resolve` | Reads a peer's advertised AirDrop service out of its action frames, and its address out of mDNS |
+| `/usr/lib/omdrop/airdrop-send.py` | The sender itself: Discover, Ask, Upload over TLS on `awdl0` |
 | `/usr/share/polkit-1/actions/org.omarchy.omdrop.policy` | Action `org.omarchy.omdrop.discover`, bound to `omdrop-discoverable`, so a desktop session can become discoverable without a password |
 | `/usr/lib/systemd/system/awdl0.service` | Boot-time `awdl0` setup. Not enabled by the install |
 | `/usr/lib/modprobe.d/brcmfmac-awdl.conf` | `debug=0x1000`, which the data-path gate counts `awdl txstatus` lines from |
 | `/usr/lib/NetworkManager/conf.d/99-awdl-unmanaged.conf` | Keeps NetworkManager off `awdl0` |
 | `/usr/share/doc/brcmfmac-awdl-dkms/` | This README, and an optional `10-wld0.link` the package does not activate |
 
-Boot creates `awdl0` but does **not** enable AWDL. An always-on AWDL makes the radio follow its slot schedule across channels, leaving the infra channel periodically — battery and STA throughput spent continuously for a feature used in bursts — and permanent discoverability is a privacy posture nobody asked for. The cost of the choice is that the first window pays the data-path gate, 15–60 s, instead of the boot paying it.
+Boot creates `awdl0` but does **not** enable AWDL. An always-on AWDL makes the radio follow its slot schedule across channels, leaving the infra channel periodically — battery and STA throughput spent continuously for a feature used in bursts — and permanent discoverability is a privacy posture nobody asked for. The cost of the choice is that the first window pays the data-path gate, about ten seconds, instead of the boot paying it.
+
+## Sending and receiving
+
+Both directions work, on a Mac and on an iPhone. Nothing here needs root except the radio window, which polkit grants without a password.
+
+### Receiving
+
+Open a window, then run a receiver bound to `awdl0` port 8771:
+
+```bash
+pkexec /usr/lib/omdrop/omdrop-discoverable start 600     # ten minutes
+pkexec /usr/lib/omdrop/omdrop-discoverable status --json
+pkexec /usr/lib/omdrop/omdrop-discoverable stop
+```
+
+This package provides the radio side only. The receiving HTTPS service lives in the [omdrop plugin](https://github.com/brentkearney/omdrop-plugin), which drives all of the above from a panel and saves arriving files; `omdrop on 10m` there does the window and the receiver together. Any AirDrop receiver listening on `[<awdl0 link-local>]:8771` will do.
+
+Set the sending Apple device to **Everyone**, or **Everyone for 10 Minutes** on iOS. Contacts Only is not supported: it rejects a self-signed certificate at TLS.
+
+### Sending
+
+```bash
+/usr/lib/omdrop/send-to-peer --list                  # who can we hear, and where
+/usr/lib/omdrop/send-to-peer FILE                    # the only peer heard
+/usr/lib/omdrop/send-to-peer --mac e2:9d:.. FILE     # pick one
+/usr/lib/omdrop/send-to-peer --wait 120 FILE         # wait for an iPhone to listen
+```
+
+A window has to be open first: the peer table is populated by the peer watcher the window starts, and the recipient's prompt names whatever `--name` says (default `Omarchy`).
+
+**Discovery is not used, deliberately.** A peer's endpoint is derived: the address is the EUI-64 link-local of its AWDL MAC, and the port comes from the service it advertises. A Mac in Everyone mode publishes `_airdrop._tcp` over mDNS *and* accepts on 8770 continuously, so it answers immediately. Waiting for an mDNS advert is what earlier attempts got wrong — a Mac with no Finder AirDrop window open publishes nothing at all, while still listening.
+
+**An iPhone is different in one way that matters.** It does not keep an AirDrop listener up while merely discoverable: measured 2026-09-18, port 8770 refused instantly, was open for a few seconds around other sharingd activity, and was gone a minute later. `--wait` polls for that opening and sends the moment it appears; without it a single attempt is a coin flip. Opening a share sheet on the phone, or receiving anything, brings its listener up.
+
+Timings from the runs that proved this, for reference: a Mac answered `/Discover` in 1.3–2.1 s and stored a file 1 s after the user tapped Accept; an iPhone the same, with the prompt visible for 2–9 s.
+
+### Diagnosing a transfer
+
+```bash
+pkexec /usr/lib/omdrop/omdrop-discoverable peers          # firmware peer table, with RSSI
+pkexec /usr/lib/omdrop/omdrop-discoverable diag 10        # counters over ten seconds
+pkexec /usr/lib/omdrop/omdrop-discoverable trace on       # per-frame tx completions in dmesg
+pkexec /usr/lib/omdrop/omdrop-discoverable trace off
+```
+
+`trace` toggles the `awdl_trace` module parameter, which gates the per-frame `awdl txstatus` and `awdl af rx` lines. Off by default, because a window submits 40 frames per interval. With it on, `tx_status=0x0000` is a frame the receiver acknowledged and `0x0003` is one the firmware discarded before it reached the air — the difference between a peer that cannot hear us and a peer we never registered.
 
 ## Configuration
 

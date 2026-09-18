@@ -889,6 +889,25 @@ cmd_read(){
   exit 0
 }
 
+# The per-frame AWDL log lines, on demand. They are the only oracle for what
+# the firmware does with a submitted frame -- a parked radio completes nothing
+# -- and they are off by default because a discoverable window submits 40
+# frames per interval. The probe borrows them for three seconds; this is for a
+# human diagnosing a send, where they need to stay on for the attempt.
+cmd_trace(){
+  local want=${1:-}
+  need_root trace "$want"
+  [[ -e $TRACE ]] || die 4 "this module has no awdl_trace parameter; it predates it"
+  case "$want" in
+    on)  printf 1 > "$TRACE" ;;
+    off) printf 0 > "$TRACE" ;;
+    ''|status) : ;;
+    *)   die 2 "usage: $0 trace [on|off]" ;;
+  esac
+  echo "awdl_trace=$(cat "$TRACE")"
+  exit 0
+}
+
 case "${1:-}" in
   start)  shift; cmd_start "$@" ;;
   stop)   cmd_stop ;;
@@ -896,6 +915,7 @@ case "${1:-}" in
   peers)  cmd_peers ;;
   diag)   shift; cmd_diag "$@" ;;
   read)   shift; cmd_read "$@" ;;
+  trace)  shift; cmd_trace "$@" ;;
   __supervise) need_root; supervise "$2" "$3" ;;
-  *) printf 'usage: %s start <seconds> | stop | status [--json] | peers | diag [seconds] | read <iovar> [len]\n' "$0" >&2; exit 2 ;;
+  *) printf 'usage: %s start <seconds> | stop | status [--json] | peers | diag [seconds] | read <iovar> [len] | trace [on|off]\n' "$0" >&2; exit 2 ;;
 esac
