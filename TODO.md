@@ -6,7 +6,7 @@ The instrumentation patches (0009–0011) are how most of this was found, and th
 
 Each section separates what was observed from what is still unknown. Where a finding rests on a single trial, it says so.
 
-1. [Receive with the Wi-Fi link on 5 GHz](#1-receive-with-the-wi-fi-link-on-5-ghz)
+1. ~~[Receive with the Wi-Fi link on 5 GHz](#1-receive-with-the-wi-fi-link-on-5-ghz)~~ ✅ Done!
 2. [Sending has never completed over AWDL](#2-sending-has-never-completed-over-awdl)
 3. [The regulatory domain is not reapplied to a fresh wiphy](#3-the-regulatory-domain-is-not-reapplied-to-a-fresh-wiphy)
 4. [`awdl0` loses `IFF_UP` across an `awdl=0/1` cycle](#4-awdl0-loses-iff_up-across-an-awdl01-cycle)
