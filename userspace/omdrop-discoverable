@@ -113,64 +113,65 @@ probe_completions(){
   dmesg | awk '/awdl txstatus/' | grep -c 'tx_status=0x' || true
 }
 
-# rx_ok: does the DATA path deliver? The completions probe only proves TRANSMIT.
-# 00:23-00:30Z showed the other half-failure: 20/20 completions, action frames
-# arriving continuously (peer table and election healthy), and ZERO data frames
-# received for seven minutes -- so peers' mDNS queries never reached the
-# responder and no SYN could ever arrive. A firmware in that state passes a
-# TX-only gate and cannot receive a file.
+# Data frames delivered, sampled rather than waited for. The completions probe
+# proves TRANSMIT only, and the receive half parks independently (00:23-00:30Z:
+# 20/20 completions, action frames arriving continuously, zero data frames for
+# seven minutes, and no peer could see us).
 #
-# Peers are audible (we hold their action frames), so their multicast mDNS
-# chatter should land within seconds. Silence here is the receive path parked.
-rx_ok(){
-  local before after
-  before=$(cat "/sys/class/net/$IF/statistics/rx_packets")
-  sleep "${1:-15}"
-  after=$(cat "/sys/class/net/$IF/statistics/rx_packets")
-  [[ $((after - before)) -gt 0 ]]
+# This used to be a 15 s wait inside the gate, and it cost every single start
+# those 15 s: in an empty room the sample cannot succeed, because no data frame
+# exists until a sender has already found us and connected. The window opened
+# UNPROVEN anyway. So the gate no longer waits; the supervisor samples the same
+# counter every interval and marks the window proven the moment frames arrive.
+#
+# Note what this counter can and cannot see: action frames -- the peer's PSFs
+# and MIFs, which is what discovery actually runs on -- never increment it.
+# Silence is weak evidence; check `diag` afrx and the peer table before
+# believing a radio is deaf.
+rx_packets(){ cat "/sys/class/net/$IF/statistics/rx_packets" 2>/dev/null || echo 0; }
+
+# Called once per supervision interval. Cheap: two file reads until the window
+# is proven, and nothing at all afterwards.
+rx_watch(){
+  [[ $(cat "$RUN/rx_proven" 2>/dev/null || echo 0) == 1 ]] && return 0
+  local base; base=$(cat "$RUN/rx_base" 2>/dev/null || echo "")
+  [[ -n $base ]] || { rx_packets > "$RUN/rx_base"; return 0; }
+  if (( $(rx_packets) > base )); then
+    rx_mark 1
+    log "receive confirmed: data frames arriving"
+  fi
+  return 0
 }
 
-# Returns 0 when the path TRANSMITS; the receive side is recovered on a
-# best-effort basis and then reported, never used to refuse the button.
+# Returns 0 when the path TRANSMITS. That is the whole question the gate can
+# answer in an empty room, and it takes about 3 s: a parked firmware parses
+# PSFs, fills its peer table and elects normally while transmitting nothing, so
+# nothing else in the radio's own state distinguishes the two.
 #
-# Both halves park independently. 01:52Z proved that refusing on a silent
-# receive sample is wrong (a quiet room is not a parked radio, and the gate
-# burned its whole budget on a radio transmitting 20/20). 02:24-02:32Z proved
-# that ignoring it is also wrong: two windows opened on a firmware that had not
-# delivered a data frame from ANY peer in nine minutes, and neither the peer
-# Mac nor the phone could see us. So: when transmit works but nothing arrives, spend
-# the enable budget trying for a firmware that hears, and if none of them does,
-# open the window anyway and say the receive side is unproven.
+# The receive half parks independently and is NOT waited for here (01:52Z: a
+# quiet room is not a parked radio, and the wait burned the gate's whole budget
+# on a radio transmitting 20/20). It is sampled by the supervisor and reported
+# through rx_proven, so a panel can tell "advertising" from "answered".
 #
 # Retoggles awdl=0/1 only while NO template is loaded: awdl=0 with awdl_payload
-# set hung the firmware (023513Z).
-# rx_proven: the gate opens on TRANSMIT, but "we can be discovered" is a
-# different claim from "we are advertising". Every exit records which one we
-# earned, so status can tell a panel the truth instead of flattening both into
-# ok (observed: window opened with receive UNPROVEN and status
-# still said ok, so the panel claimed "Visible to everyone" for a radio
-# nobody had answered).
-#
-# Note what rx_ok can and cannot see: it counts DATA frames. Action frames --
-# the peer's PSFs and MIFs, which is what discovery actually runs on -- never
-# increment it, and no data frame exists until a sender has already found us
-# and connected. So "receive silent" in an idle room is weak evidence, not
-# proof of deafness: check `diag` afrx and the peer table before believing it.
+# set hung the firmware (023513Z), and that dead end needs a module reload.
 rx_mark(){ printf '%s' "$1" > "$RUN/rx_proven"; }
+
+# Every exit that opens a window starts the receive sample from here.
+open_on_transmit(){
+  rx_packets > "$RUN/rx_base"
+  log "gate: $1 transmits; opening with receive unproven until data arrives"
+}
 gate(){
-  local n try tx_ok=0
+  local n try
   rx_mark 0
+  rm -f "$RUN/rx_base"
   n=$(probe_completions) || return 2
   log "gate: probe 20 frames -> $n completions"
-  if [[ ${n:-0} -ge 15 ]]; then
-    tx_ok=1
-    rx_ok && { log "gate: receive confirmed"; rx_mark 1; return 0; }
-    log "gate: transmitting but no data frames in 15 s -- trying to recover the receive path"
-  fi
+  if [[ ${n:-0} -ge 15 ]]; then open_on_transmit probe; return 0; fi
   local plen; plen=$(iovar_get_len awdl_payload 512 "$RUN/payload.bin")
   if [[ ${plen:-0} -gt 0 ]]; then
     log "gate: template loaded (awdl_payload len $plen); no awdl=0 retoggle (023513Z)"
-    [[ $tx_ok -eq 1 ]] && { log "gate: opening on a transmitting radio, receive UNPROVEN"; return 0; }
     return 1
   fi
   for try in $(seq 1 "$ENABLES"); do
@@ -181,15 +182,9 @@ gate(){
       sleep "$wait"
       n=$(probe_completions) || return 2
       log "gate: enable $try, probe 20 frames -> $n completions"
-      if [[ ${n:-0} -ge 15 ]]; then
-        tx_ok=1
-        rx_ok && { log "gate: receive confirmed on enable $try"; rx_mark 1; return 0; }
-        log "gate: enable $try transmits, receive still silent"
-        break                       # this enable is a dud for RX; take another
-      fi
+      if [[ ${n:-0} -ge 15 ]]; then open_on_transmit "enable $try"; return 0; fi
     done
   done
-  [[ $tx_ok -eq 1 ]] && { log "gate: opening after $ENABLES enables with the receive side UNPROVEN"; return 0; }
   return 1
 }
 
@@ -491,6 +486,9 @@ supervise(){
       ip link set "$IF" allmulticast on 2>/dev/null
     fi
     track_election
+    # The gate opens on transmit alone; this is where the receive half earns
+    # its claim, without any start paying for the measurement.
+    rx_watch
     # An infrastructure reassociation can make avahi re-announce on awdl0 and
     # rename itself after hearing its own record. Keep the host name repaired
     # throughout a long receive window.
