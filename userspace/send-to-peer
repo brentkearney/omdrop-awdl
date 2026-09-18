@@ -48,16 +48,54 @@ def link_local(mac):
     return "fe80::" + ":".join(groups)
 
 
+class HelperFailed(Exception):
+    """The peer table could not be read at all, which is not an empty room."""
+
+
 def peers():
-    """Every MAC the firmware can currently hear, strongest signal first."""
-    out = subprocess.run(["pkexec", HELPER, "peers"],
-                         capture_output=True, text=True).stdout
+    """Every MAC the firmware can currently hear, strongest signal first.
+
+    Reading the table needs root, so it goes through the helper. Two failures
+    look identical in the output and are not: a room with nobody in it, and a
+    helper that never ran. Reporting the second as the first sent a debugging
+    session after the radio when the real answer was polkit (2026-09-18).
+
+    polkit grants this without a password only to a session on a seat. Over
+    SSH there is no seat, so `pkexec` prompts and then fails with "No session
+    for cookie" -- the password is never even checked. `sudo` does not involve
+    polkit and works there.
+    """
+    run = subprocess.run(["pkexec", HELPER, "peers"], capture_output=True, text=True)
+    if run.returncode != 0:
+        detail = (run.stderr or run.stdout).strip().splitlines()
+        hint = ""
+        if not on_a_seat():
+            hint = (f"\nThis session has no seat, so polkit will not authorize it. Use:"
+                    f"\n  sudo {HELPER} peers")
+        raise HelperFailed(
+            f"could not read the peer table ({HELPER} exited {run.returncode})"
+            + (f": {detail[-1]}" if detail else "") + hint)
     found = []
-    for line in out.splitlines():
+    for line in run.stdout.splitlines():
         m = re.search(r"([0-9a-f]{2}(?::[0-9a-f]{2}){5})\s+rssi=\s*(-?\d+)", line)
         if m:
             found.append((m.group(1), int(m.group(2))))
     return sorted(found, key=lambda p: -p[1])
+
+
+def on_a_seat():
+    """Is this a local session polkit will treat as active?
+
+    Only a seated session gets allow_active. A remote or seatless one falls to
+    allow_any, which this action deliberately sets to auth_admin.
+    """
+    run = subprocess.run(["loginctl", "show-session", os.environ.get("XDG_SESSION_ID", ""),
+                          "-p", "Seat"], capture_output=True, text=True)
+    if run.returncode == 0 and "Seat=" in run.stdout:
+        return run.stdout.strip() != "Seat="
+    # No session id to ask about: assume seatless and offer the sudo hint,
+    # which is wrong only in the harmless direction.
+    return bool(os.environ.get("XDG_SEAT"))
 
 
 def listening(host, port, timeout=2.0):
@@ -96,10 +134,15 @@ def main():
                          "an iPhone only listens in bursts")
     args = ap.parse_args()
 
-    heard = peers()
+    try:
+        heard = peers()
+    except HelperFailed as e:
+        print(e, file=sys.stderr)
+        return 4
     if args.list:
         if not heard:
-            print("no peers in the firmware table; open a receive window first")
+            print("the peer table is empty: nobody is advertising within earshot. "
+                  "A window has to be open for the peer watcher to fill it.")
             return 1
         for mac, rssi in heard:
             print(f"{mac}  {rssi:>4} dBm  [{link_local(mac)}%{IFACE}]:{args.port}")
@@ -115,7 +158,8 @@ def main():
     elif len(heard) == 1:
         mac = heard[0][0]
     elif not heard:
-        print("no peers in the firmware table; open a receive window first", file=sys.stderr)
+        print("the peer table is empty: nobody is advertising within earshot. "
+              "A window has to be open for the peer watcher to fill it.", file=sys.stderr)
         return 2
     else:
         print("several peers heard; choose one with --mac:", file=sys.stderr)
