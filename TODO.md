@@ -11,7 +11,7 @@ Each section separates what was observed from what is still unknown. Where a fin
 3. [The regulatory domain is not reapplied to a fresh wiphy](#3-the-regulatory-domain-is-not-reapplied-to-a-fresh-wiphy)
 4. [`awdl0` loses `IFF_UP` across an `awdl=0/1` cycle](#4-awdl0-loses-iff_up-across-an-awdl01-cycle)
 5. [`awdl=0` with a PSF template loaded wedges the firmware](#5-awdl0-with-a-psf-template-loaded-wedges-the-firmware)
-6. [The instrumentation logs unconditionally](#6-the-instrumentation-logs-unconditionally)
+6. ~~[The instrumentation logs unconditionally](#6-the-instrumentation-logs-unconditionally)~~ ✅ Done!
 7. [The kernel tag is pinned](#7-the-kernel-tag-is-pinned)
 8. [Only BCM4387 has been tested](#8-only-bcm4387-has-been-tested)
 9. [Power cost is unmeasured](#9-power-cost-is-unmeasured)
@@ -111,17 +111,15 @@ country 99: DFS-UNSET
 - Is there an iovar that resets the AWDL data path without unloading the module? That would remove the last unrecoverable state in the driver.
 - Is there any way to make `awdl_payload` report "no template" again short of a reload?
 
-## 6. The instrumentation logs unconditionally
+## 6. ~~The instrumentation logs unconditionally~~ ✅ Done!
 
 #### What we know
 
-- Patches 0009–0011 are the only oracle for what the firmware is doing.
-- The data-path gate counts their per-frame output, so a build without them cannot tell a parked radio from a working one.
-- They log on every frame, which is a lot of dmesg for a release build.
-
-#### Open questions
-
-- Is there a form — `dyndbg`, a module parameter, a tracepoint — that keeps the oracle available on demand without the steady-state volume?
+- Patches 0009–0011 are the only oracle for what the firmware is doing, and the data-path gate counts their per-frame output, so a build without them cannot tell a parked radio from a working one.
+- The `awdl_trace` module parameter answers the question this item opened: a module parameter, off by default and writable at runtime (`0644`), keeps the oracle available on demand without the steady-state volume.
+- Both per-frame sites are gated — `awdl af rx` in `p2p.c` and `awdl txstatus` in `msgbuf.c` — and both keep their existing rate limits.
+- Turn it on for a diagnosis without reloading anything: `echo 1 > /sys/module/brcmfmac/parameters/awdl_trace`.
+- Measured on the installed 0.2.1 module over 40-second windows: 0 lines with the parameter off, 97 with it on.
 
 ## 7. The kernel tag is pinned
 
