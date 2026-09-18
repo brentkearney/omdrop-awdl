@@ -33,7 +33,8 @@ set -uo pipefail
 # our own realpath rather than the working directory, because pkexec runs us
 # with the caller's cwd -- from the panel that is wherever the shell was
 # started, and a helper looked up relatively there is simply not found.
-LIB="$(cd "$(dirname "$(readlink -f "$0")")" && pwd)"
+SELF="$(readlink -f "$0")"
+LIB="$(cd "$(dirname "$SELF")" && pwd)"
 # Per-machine tunables and the diagnostic switches. Absent is the normal case:
 # every knob below has a working default, and the directory only exists on a
 # machine someone has tuned.
@@ -505,10 +506,37 @@ supervise(){
 }
 
 supervisor_pid(){ cat "$RUN/supervisor" 2>/dev/null; }
+
+# Enumerate by exact argv pairs instead of grepping /proc/*/cmdline. Omarchy's
+# small grep replacement does not search those NUL-separated procfs files, so
+# the old predicate declared every successfully spawned supervisor dead. Each
+# retry then created another supervisor while the caller reported failure.
+supervisor_pids(){
+  local proc i
+  local -a argv=()
+  for proc in /proc/[0-9]*; do
+    argv=()
+    mapfile -d '' -t argv < "$proc/cmdline" 2>/dev/null || continue
+    for (( i = 0; i + 1 < ${#argv[@]}; i++ )); do
+      if [[ ${argv[i]} == "$SELF" && ${argv[i + 1]} == __supervise ]]; then
+        printf '%s\n' "${proc##*/}"
+        break
+      fi
+    done
+  done
+}
+
 # /proc, not `kill -0`: status runs as the unprivileged user and signalling a
 # root process fails with EPERM, which reported a live window as expired.
-supervisor_alive(){ local p; p=$(supervisor_pid)
-                    [[ -n ${p:-} && -d /proc/$p ]] && grep -qa awdl-discoverable "/proc/$p/cmdline" 2>/dev/null; }
+supervisor_alive(){
+  local recorded owned
+  recorded=$(supervisor_pid)
+  [[ -n ${recorded:-} && -d /proc/$recorded ]] || return 1
+  while read -r owned; do
+    [[ $owned == "$recorded" ]] && return 0
+  done < <(supervisor_pids)
+  return 1
+}
 
 # --- commands ---------------------------------------------------------------
 cmd_start(){
@@ -629,7 +657,7 @@ cmd_start(){
   # the advertising children must outlive it. The supervisor writes its own pid.
   # 9>&-: the start lock must not be inherited, or the supervisor would hold it
   # for the whole window and every later start would exit 5 instead of extending.
-  setsid "$0" __supervise "$until" "$secs" >>"$LOG" 2>&1 9>&- &
+  setsid "$SELF" __supervise "$until" "$secs" >>"$LOG" 2>&1 9>&- &
   # Wait for the supervisor to claim the window, so `start` never returns 0 on
   # a window that failed to come up.
   local i
@@ -758,10 +786,14 @@ band_watch(){
 cmd_stop(){
   need_root stop
   mkdir -p "$RUN"
-  local p; p=$(supervisor_pid)
-  [[ -n ${p:-} ]] && kill -TERM "$p" 2>/dev/null
+  # Stop every supervisor we own, not only the last PID written. Older builds
+  # could misclassify a live supervisor and spawn another; leaving either one
+  # alive keeps rewriting the shared template after the panel says Omdrop is off.
+  local p
+  while read -r p; do
+    [[ -n ${p:-} ]] && kill -TERM "$p" 2>/dev/null
+  done < <(supervisor_pids)
   sleep 1
-  kill_children
   # A `start` still in its gate phase owns no supervisor and no pids file, but
   # it is toggling `awdl=0/1` -- so "stop" has to mean that too, or a stuck gate
   # keeps cycling the radio after the user has switched the button off.
