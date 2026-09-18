@@ -491,10 +491,10 @@ supervise(){
       ip link set "$IF" allmulticast on 2>/dev/null
     fi
     track_election
-    # The rename lands mid-window, when the band move's reassociation makes
-    # avahi re-announce. Checking every tenth interval keeps the name back
-    # within seconds instead of leaving the host unreachable until stop.
-    if (( seq % 10 == 1 )); then mdns_reclaim; band_watch; fi
+    # An infrastructure reassociation can make avahi re-announce on awdl0 and
+    # rename itself after hearing its own record. Keep the host name repaired
+    # throughout a long receive window.
+    if (( seq % 10 == 1 )); then mdns_reclaim; fi
     python3 "$LIB/awdl-airdrop-adv.py" --iface "$IF" --count "$ADV_COUNT" \
       --interval 0.02 --flags "$ADV_FLAGS" --seq $(( seq * 100 )) >/dev/null 2>&1
     sleep "$ADV_INTERVAL"
@@ -672,11 +672,11 @@ cmd_start(){
 }
 
 # --- mDNS identity ------------------------------------------------------------
-# A window moves the Wi-Fi to 2.4 GHz, which drops and re-forms the infra link,
-# and avahi re-announces on every one of those transitions. avahi also publishes
-# on awdl0, where an announcement comes back off the AWDL link; avahi reads the
-# echo as another host holding the name and renames itself -- host -> host-2
-# (observed 130913T180746, 66 mDNS frames on awdl0 in the same window).
+# Infrastructure reassociations make avahi re-announce on every interface.
+# avahi also publishes on awdl0, where an announcement comes back off the AWDL
+# link; avahi reads the echo as another host holding the name and renames itself
+# -- host -> host-2 (observed 130913T180746, 66 mDNS frames on awdl0 in the same
+# window).
 #
 # The rename outlives the window. Every other machine resolving <host>.local
 # gets nothing, so `ping` and `scp` to this host fail long after AirDrop is off.
@@ -704,84 +704,6 @@ mdns_reclaim(){
     && log "reclaimed the mDNS name $want.local (avahi had renamed it $cur.local)"
 }
 
-# Watch for up to $1 seconds. The band move at teardown reassociates after we
-# return, so a single check at stop can run before the rename it needs to undo.
-cmd_mdns_reclaim(){
-  need_root mdns-reclaim
-  local secs=${1:-0} i
-  mdns_reclaim
-  for (( i = 0; i < secs; i += 2 )); do
-    sleep 2
-    mdns_reclaim
-  done
-  exit 0
-}
-
-# --- the band the infrastructure link sits on --------------------------------
-# One radio serves both the infra association and AWDL's channel sequence. With
-# the infra link on 2.4 GHz the firmware can hold AWDL's 5 GHz dwells; with both
-# on 5 GHz it stops being discoverable. Measured 2026-09-14: same AWDL sequence
-# (157-dense), infra 2.4 GHz transferred a file, infra 5 GHz was never seen.
-#
-# The band is chosen once, when the window opens, and then an access point can
-# band-steer the link out from under us with no disconnect at all -- 160915
-# 17:39 associated on 2.4, 18:16 roamed to the 5 GHz BSS of the same SSID, and
-# the window stayed "visible" and undiscoverable until morning. So it has to be
-# watched for as long as the window is open.
-infra_iface(){
-  local dev
-  for dev in /sys/class/net/*/wireless; do
-    dev=${dev%/wireless}; dev=${dev##*/}
-    [[ $dev == "$IF" ]] && continue
-    [[ $(cat "/sys/class/net/$dev/operstate" 2>/dev/null) == up ]] || continue
-    printf '%s\n' "$dev"; return 0
-  done
-  return 1
-}
-
-# 2.4, 5, or empty when there is no association to reason about. Empty is not a
-# fault: an unassociated radio has not been steered anywhere.
-infra_band(){
-  local dev freq
-  dev=$(infra_iface) || return 0
-  command -v iw >/dev/null 2>&1 || return 0
-  freq=$(iw dev "$dev" link 2>/dev/null | sed -n 's/.*freq: *\([0-9]*\).*/\1/p' | head -1)
-  [[ -n ${freq:-} ]] || return 0
-  if (( freq >= 2400 && freq < 2500 )); then printf '2.4\n'; else printf '5\n'; fi
-}
-
-# Put the link back on 2.4 by reconnecting its profile, which NetworkManager
-# only binds the band setting at. Bounded deliberately: an access point that
-# steers on every association would otherwise have us cycling the user's network
-# forever. After BAND_FIX_TRIES attempts we stop and leave the marker, so the
-# panel can say what is wrong instead of a background loop hiding it.
-BAND_FIX_COOLDOWN=900
-BAND_FIX_TRIES=3
-band_watch(){
-  local band now_s last tries uuid
-  band=$(infra_band)
-  if [[ -z ${band:-} || $band == 2.4 ]]; then
-    [[ -e "$RUN/offband" ]] && { rm -f "$RUN/offband" "$RUN/offband.tries"
-                                 log "infra link is back on 2.4 GHz"; }
-    return 0
-  fi
-  if [[ ! -e "$RUN/offband" ]]; then
-    printf '%s\n' "$(now)" > "$RUN/offband"
-    log "infra link moved to ${band} GHz -- Apple devices cannot discover us there"
-  fi
-  command -v nmcli >/dev/null 2>&1 || return 0
-  tries=$(cat "$RUN/offband.tries" 2>/dev/null || echo 0)
-  (( tries < BAND_FIX_TRIES )) || return 0
-  now_s=$(now); last=$(cat "$RUN/offband.last" 2>/dev/null || echo 0)
-  (( now_s - last >= BAND_FIX_COOLDOWN )) || return 0
-  uuid=$(nmcli -t -f UUID,TYPE connection show --active 2>/dev/null \
-         | awk -F: '$2 == "802-11-wireless" { print $1; exit }')
-  [[ -n ${uuid:-} ]] || return 0
-  printf '%s\n' "$now_s" > "$RUN/offband.last"
-  printf '%s\n' "$(( tries + 1 ))" > "$RUN/offband.tries"
-  log "reconnecting the infra link to get back to 2.4 GHz (attempt $(( tries + 1 ))/$BAND_FIX_TRIES)"
-  nmcli connection up uuid "$uuid" >/dev/null 2>&1 || log "reconnect failed"
-}
 
 cmd_stop(){
   need_root stop
@@ -832,11 +754,7 @@ cmd_status(){
     # has answered yet" instead of calling both ok.
     visible=true
     remaining=$([[ $until == 0 ]] && echo null || echo $(( until - $(now) )))
-    # An off-band link is the one failure that looks exactly like success from
-    # up here: window open, awdl0 up, frames leaving, nobody able to see us.
-    # Say so rather than reporting ok and letting someone wait all night.
-    if [[ -e "$RUN/offband" ]]; then reason=offband
-    elif [[ $rxp == 1 ]]; then reason=ok; else reason=unproven; fi
+    if [[ $rxp == 1 ]]; then reason=ok; else reason=unproven; fi
   else
     visible=false; remaining=null
     [[ $reason == ok || $reason == unproven ]] && reason=expired
@@ -966,7 +884,6 @@ case "${1:-}" in
   peers)  cmd_peers ;;
   diag)   shift; cmd_diag "$@" ;;
   read)   shift; cmd_read "$@" ;;
-  mdns-reclaim) shift; cmd_mdns_reclaim "$@" ;;
   __supervise) need_root; supervise "$2" "$3" ;;
-  *) printf 'usage: %s start <seconds> | stop | status [--json] | peers | diag [seconds] | read <iovar> [len] | mdns-reclaim [seconds]\n' "$0" >&2; exit 2 ;;
+  *) printf 'usage: %s start <seconds> | stop | status [--json] | peers | diag [seconds] | read <iovar> [len]\n' "$0" >&2; exit 2 ;;
 esac
