@@ -8,7 +8,7 @@ Each section separates what was observed from what is still unknown. Where a fin
 
 1. ~~[Receive with the Wi-Fi link on 5 GHz](#1-receive-with-the-wi-fi-link-on-5-ghz)~~ ✅ Done!
 2. [Sending has never completed over AWDL](#2-sending-has-never-completed-over-awdl)
-3. [The regulatory domain is not reapplied to a fresh wiphy](#3-the-regulatory-domain-is-not-reapplied-to-a-fresh-wiphy)
+3. ~~[The regulatory domain is not reapplied to a fresh wiphy](#3-the-regulatory-domain-is-not-reapplied-to-a-fresh-wiphy)~~ ✅ Done!
 4. [`awdl0` loses `IFF_UP` across an `awdl=0/1` cycle](#4-awdl0-loses-iff_up-across-an-awdl01-cycle)
 5. [`awdl=0` with a PSF template loaded wedges the firmware](#5-awdl0-with-a-psf-template-loaded-wedges-the-firmware)
 6. ~~[The instrumentation logs unconditionally](#6-the-instrumentation-logs-unconditionally)~~ ✅ Done!
@@ -56,31 +56,22 @@ Each section separates what was observed from what is still unknown. Where a fin
 - In the Mac runs that did have an endpoint, why is the SYN unanswered — is our `awdl_peer_op` entry for that Mac correct? We have only recently learned the entry can be read back, and it has never been checked in a send attempt.
 - How does action-frame TX pace against an in-flight transfer? That path has only ever been exercised as a receiver, where our action frames compete with inbound data rather than outbound.
 
-## 3. The regulatory domain is not reapplied to a fresh wiphy
+## 3. ~~The regulatory domain is not reapplied to a fresh wiphy~~ ✅ Done!
 
 #### What we know
 
-- After a module reload the wiphy comes back in the world domain while the system domain is unchanged:
-
-```
-global
-country CA: DFS-FCC
-	(5730 - 5850 @ 80), (N/A, 36), (N/A), AUTO-BW    ← ch157 allowed
-
-phy#19
-country 99: DFS-UNSET
-	(5460 - 5860 @ 160), (6, 20), (N/A)              ← the card itself
-```
-
-- In the world domain 5 GHz cannot initiate radiation until a beacon has been heard. NetworkManager's autoconnect times out before that happens, so the link needs a manual Wi-Fi cycle after every reload — four times in a single session.
-- On 2.4 GHz the world domain still permits active scanning, and the link returns unattended.
-- Firmware regulatory has been investigated as a 5 GHz *transmit* gate and retired as a dead end. This entry is about the wiphy's domain and the association it blocks, which is a different thing and is unresolved.
+- **Closed by measurement, not by a fix: the premise was wrong.** `country 99: DFS-UNSET` on a fresh wiphy is not a lost domain and does not block 5 GHz.
+- `brcmfmac` sets `REGULATORY_CUSTOM_REG` and ignores the boot-time `00` hint, so the wiphy advertises its own custom domain built from the firmware's channel list. The label is cosmetic; the enforcement lives in the firmware.
+- The firmware carries a real country: `country` iovar reads `US`, rev 0, on this machine. Read it with `awdl-up --reload`, which now logs it.
+- Measured on a fresh wiphy: 25 of 29 5 GHz channels are usable immediately, UNII-1 at 23 dBm and UNII-3 at 30 dBm. The 16 no-IR channels are exactly the DFS band (52–144), which is correct behaviour in every domain — those do need a beacon first.
+- 5 GHz association after a reload works unattended. Observed reconnecting to channel 44 (5220 MHz) with no manual Wi-Fi cycle.
+- `iw reg set` cannot change any of this: the notifier reads the country iovar, then `brcmf_translate_country_code` has no table to translate against and returns without setting anything. Verified — the wiphy stayed at 99 and the firmware stayed at `US`.
+- `awdl-up --reload` now logs the three facts a 5 GHz complaint needs: what the firmware enforces, what the wiphy advertises, and how many 5 GHz channels are held back.
 
 #### Open questions
 
-- Where is the country meant to be reapplied — CLM download on firmware attach, or a `regulatory_hint` after the wiphy is registered?
-- Is the world domain transient and merely slower than NetworkManager's patience, or does it persist until something external triggers it?
-- Does this explain the 5 GHz receive failure above? Both involve 5 GHz being unusable after a reload, and neither has been ruled out as a symptom of the other.
+- Which band NetworkManager lands on after a reload varies — channel 44 on one reload, 2412 MHz on the next, same AP. That is client/AP band steering, not regulatory, and it is the only part of the original complaint still unexplained.
+- The firmware enforces `US` on a machine whose system domain is `CA`. The two differ in the 5600–5650 MHz weather-radar band. Worth a deliberate decision rather than a silent write: the package does not set a country today.
 
 ## 4. `awdl0` loses `IFF_UP` across an `awdl=0/1` cycle
 
