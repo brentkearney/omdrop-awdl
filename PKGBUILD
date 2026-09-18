@@ -87,9 +87,16 @@ package() {
   install -Dm755 "${startdir}/userspace/awdl-up" "${lib}/awdl-up"
   local helper
   for helper in awdl-airdrop-adv awdl-election awdl-mdns-respond awdl-peer-watch \
-                awdl-peers awdl-stats ble-airdrop-adv brcm_iovar mkpsf; do
+                awdl-peers awdl-stats ble-airdrop-adv brcm_iovar mkpsf \
+                awdl-af-parse airdrop-send; do
     install -Dm755 "${startdir}/userspace/${helper}.py" "${lib}/${helper}.py"
   done
+  # Sending. Proven 2026-09-18 to a Mac and an iPhone: dial the peer's EUI-64
+  # link-local on the port it advertises, rather than waiting for an mDNS
+  # advert a Mac never publishes. Neither needs root -- they read the peer
+  # table through the helper above.
+  install -Dm755 "${startdir}/userspace/send-to-peer" "${lib}/send-to-peer"
+  install -Dm755 "${startdir}/userspace/awdl-resolve" "${lib}/awdl-resolve"
   # Imported, never executed: the machine identity and tunables every helper
   # above reads instead of carrying a baked-in MAC or hostname.
   install -Dm644 "${startdir}/userspace/awdl_identity.py" "${lib}/awdl_identity.py"
