@@ -152,6 +152,12 @@ Nothing is required. Every tunable has a working default, and the helpers read t
 | `election-metric` | `100` | The election metric advertised and enforced |
 | `rssi-sync-threshold` | firmware default | dBm floor for adopting a peer as root; `-60` keeps the election to the room |
 
+## Power
+
+An open window costs **71 mW** (95% CI 59.8–82.5), measured on an M1 Pro over 5.6 hours of alternating six-minute blocks. That is 1.5% of a 4.71 W idle machine, or 0.083% of an 86 Wh charge per hour — a ten-minute window costs about 19 seconds of runtime, and staying discoverable around the clock costs 2% of a battery per day.
+
+So power is not a reason to keep windows short. How long to stay visible is a question about who can see the machine, not about battery. Method, data and caveats are in [issue #8](https://github.com/brentkearney/omdrop-awdl/issues/8#issuecomment-5731084807); reproduce with `power-cost` in the research tree.
+
 ## DKMS Failsafe
 
 DKMS (Dynamic Kernel Module Support) installs the patched module to `updates/dkms/`, which `depmod` prefers over the in-tree driver **without deleting the original**. If a kernel update breaks the out-of-tree build, the stock `brcmfmac` loads and Wi-Fi still works. You lose AWDL, never the network.
