@@ -97,7 +97,7 @@ pkexec /usr/lib/omdrop/omdrop-discoverable stop
 
 This package provides the radio side only. The receiving HTTPS service lives in the [omdrop plugin](https://github.com/brentkearney/omdrop-plugin), which drives all of the above from a panel and saves arriving files; `omdrop on 10m` there does the window and the receiver together. Any AirDrop receiver listening on `[<awdl0 link-local>]:8771` will do.
 
-Set the sending Apple device to **Everyone**, or **Everyone for 10 Minutes** on iOS. Contacts Only is not supported: it rejects a self-signed certificate at TLS.
+The sending Apple device can be set to **Everyone** or to **Contacts Only**; both work, in both directions. Contacts Only requires an Apple-issued identity installed on this machine, which is what the Apple device checks you against. Without one, use **Everyone**, or **Everyone for 10 Minutes** on iOS — a self-signed certificate is rejected at TLS.
 
 ### Sending
 
