@@ -9,6 +9,7 @@ This is the driver half of an upcoming ["Omdrop" plugin](https://github.com/bren
 - [Hardware](#hardware)
 - [Install](#install)
 - [What the package installs](#what-the-package-installs)
+- [Sending and Receiving](#sending-and-receiving)
 - [Configuration](#configuration)
 - [DKMS Failsafe](#dkms-failsafe)
 - [The patches](#the-patches)
@@ -81,7 +82,7 @@ pkexec /usr/lib/omdrop/omdrop-discoverable stop
 
 Boot creates `awdl0` but does **not** enable AWDL. An always-on AWDL makes the radio follow its slot schedule across channels, leaving the infra channel periodically — battery and STA throughput spent continuously for a feature used in bursts — and permanent discoverability is a privacy posture nobody asked for. The cost of the choice is that the first window pays the data-path gate, about ten seconds, instead of the boot paying it.
 
-## Sending and receiving
+## Sending and Receiving
 
 Both directions work, on a Mac and on an iPhone. Nothing here needs root except the radio window, which polkit grants without a password.
 
@@ -126,17 +127,6 @@ pkexec /usr/lib/omdrop/omdrop-discoverable trace off
 ```
 
 `trace` toggles the `awdl_trace` module parameter, which gates the per-frame `awdl txstatus` and `awdl af rx` lines. Off by default, because a window submits 40 frames per interval. With it on, `tx_status=0x0000` is a frame the receiver acknowledged and `0x0003` is one the firmware discarded before it reached the air — the difference between a peer that cannot hear us and a peer we never registered.
-
-### Over SSH
-
-`pkexec` works without a password only from a session on a **seat**. An SSH session has none, so polkit falls through to `auth_admin` — deliberately, because nobody should turn on a machine's discoverability from somewhere else. Worse, the prompt cannot succeed there either: `polkit-agent-helper-1` hands polkitd a session cookie it cannot resolve and the exchange dies with `No session for cookie`, so a correct password still reports `AUTHENTICATION FAILED`. The password is never checked.
-
-Use `sudo` instead, which does not involve polkit:
-
-```bash
-sudo /usr/lib/omdrop/omdrop-discoverable peers
-sudo /usr/lib/omdrop/omdrop-discoverable start 600
-```
 
 ## Configuration
 
