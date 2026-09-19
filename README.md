@@ -4,7 +4,7 @@ AWDL support for the Broadcom BCM4387: eleven patches to `brcmfmac`, a DKMS pack
 
 AWDL — Apple Wireless Direct Link — is the link layer AirDrop and AirPlay run over. These patches create an `awdl0` interface from the firmware's own AWDL implementation, rather than reimplementing the protocol in userspace.
 
-This is the driver half of an upcoming "Omdrop" plugin for [Omarchy M](https://github.com/omacom/omarchy-mac), the Omarchy Linux distribution for Macs.
+This is the driver half of an upcoming ["Omdrop" plugin](https://github.com/brentkearney/omdrop-plugin) for [Omarchy M](https://github.com/omacom/omarchy-mac), the Omarchy Linux distribution for Macs.
 
 - [Hardware](#hardware)
 - [Install](#install)
