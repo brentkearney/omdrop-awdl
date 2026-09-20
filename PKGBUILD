@@ -11,7 +11,7 @@
 pkgname=brcmfmac-awdl-dkms
 pkgver=0.3.1
 pkgrel=1
-_asahitag=asahi-7.1.13-2
+_asahitag=asahi-7.1.13-3
 pkgdesc="AWDL (AirDrop link layer) support for the BCM4387: DKMS module and root helpers"
 arch=('aarch64')
 url="https://github.com/brentkearney/omdrop-awdl"
@@ -43,7 +43,8 @@ install="${pkgname}.install"
 #   git archive <tag> drivers/net/wireless/broadcom/brcm80211/{brcmfmac,brcmutil,include} | tar -x -C kernel
 # and re-check the patches. Keeping the kernel path prefix is what lets them
 # apply with -p1 exactly as they would upstream.
-_asahicommit=13aba96fb344feb5708d998c54331a719431a3db
+# The tag is annotated, so this is the commit it points at, not the tag object.
+_asahicommit=94fb23346d522edf53722357c426a3e58030beea
 # makepkg's source array takes files, not directories, so the vendored tree and
 # the rest of the checkout are read from ${startdir} the way they always were.
 # prepare() copies the kernel sources into ${srcdir} first: patching in place
