@@ -160,6 +160,12 @@ def peer_name(mac, port, sender_name, timeout=8.0):
     request: the identity record, the TLS material and the /Discover body all
     live there, and a second copy of them would drift.
     """
+    # A cheap TCP knock first. Spawning the sender costs a python start, TLS
+    # material and two attempts, and for a device that is not receiving all of
+    # that is spent to learn what one refused connection says in a moment:
+    # six peers took 49 s before this, and under 2 s after.
+    if not listening(link_local(mac), port, timeout=1.5):
+        return None
     target = f"[{link_local(mac)}%{IFACE}]:{port}"
     # Twice, because the first attempt to an Apple peer is unreliable: macOS
     # accepts on identity, restarts its Bonjour server for a peer it classes as
@@ -192,7 +198,9 @@ def main():
     ap = argparse.ArgumentParser(description=__doc__,
                                  formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("file", nargs="?", help="file to send")
-    ap.add_argument("--mac", help="peer to send to; default is the only one heard")
+    ap.add_argument("--mac", metavar="NAME|ADDRESS",
+                    help="who to send to: a peer name, or part of its address. "
+                         "Default is the only device heard")
     ap.add_argument("--list", action="store_true", help="list peers and their endpoints")
     ap.add_argument("--print", dest="show", action="store_true",
                     help="print the sender command without running it")
@@ -247,10 +255,45 @@ def main():
     if not args.file:
         ap.error("a file is required unless --list")
     if args.mac:
-        mac = args.mac.lower()
-        if mac not in [m for m, _ in heard]:
-            print(f"{mac} is not in the peer table; --list shows what is", file=sys.stderr)
+        want = args.mac.lower()
+        known = [m for m, _ in heard]
+        # An address carries a colon, or is a full 12-hex MAC. Anything else is
+        # a name -- and the test has to be that strict, because real device
+        # names are often pure hex: "f0011" is a machine here, and treating it
+        # as an address fragment would silently target the wrong device.
+        #
+        # A person sending a file knows who they are sending to, not what MAC
+        # that device is wearing this minute; the MAC rotates every few
+        # minutes, so it is the worse handle of the two.
+        if ":" in want or re.fullmatch(r"[0-9a-f]{12}", want):
+            matches = [m for m in known if want in m]
+        else:
+            # Asking costs a connection per peer, which is why the listing
+            # makes it opt-in. Here it is not optional: resolving the name IS
+            # the request. It also works precisely when it matters, because a
+            # device can only receive the file if it is already listening.
+            names = peer_names(known, args.port, args.name)
+            matches = [m for m, n in names.items() if n and want in n.lower()]
+            if not matches:
+                named = {m: n for m, n in names.items() if n}
+                print(f'no device answering to "{args.mac}" is receiving right now.', file=sys.stderr)
+                if named:
+                    print("  these named themselves:", file=sys.stderr)
+                    for m, n in named.items():
+                        print(f"    {n}  ({m})", file=sys.stderr)
+                else:
+                    print("  no peer would give a name: a device is named only while it is "
+                          "receiving, so open AirDrop on it first.", file=sys.stderr)
+                return 2
+        if len(matches) > 1:
+            print(f'"{args.mac}" matches more than one device:', file=sys.stderr)
+            for m in matches:
+                print(f"    {m}", file=sys.stderr)
             return 2
+        if not matches:
+            print(f"{args.mac} is not in the peer table; --list shows what is", file=sys.stderr)
+            return 2
+        mac = matches[0]
     elif len(heard) == 1:
         mac = heard[0][0]
     elif not heard:
