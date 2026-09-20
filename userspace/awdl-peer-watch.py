@@ -23,6 +23,7 @@ its first frame, print its link-local address, and exit. Failure exits nonzero.
 """
 import argparse
 import os
+import signal
 import socket
 import subprocess
 import sys
@@ -91,28 +92,116 @@ def note_peer_op(macs, ok):
         pass    # never let bookkeeping break registration
 
 
+def peer_op(op, mac):
+    """ADD (op 0) or DEL (op 1) a firmware peer entry. Returns (ok, tail)."""
+    if op == 0:
+        payload = b'\x00\x00' + mac + b'\x01' + HT_IE
+    else:
+        # awdl_peer_op_t = version(1) opcode(1) addr(6) mode(1). The 9-byte
+        # form is DEL only: sent with opcode 0 it returns NOMEM, and one
+        # variant trapped the firmware (2026-09-02). Do not reuse it for ADD.
+        payload = b'\x00\x01' + mac + b'\x01'
+    r = subprocess.run([sys.executable, IOVAR, '-i', args.iface, 'set',
+                        'awdl_peer_op', payload.hex()], capture_output=True, text=True, timeout=8)
+    tail = (r.stdout.strip().splitlines() or [''])[-1].split('-> ')[-1]
+    return (r.returncode == 0 and tail == 'OK'), tail
+
+
+def forget(mac):
+    """Drop a peer from the firmware table and from the neighbour table."""
+    macs = ':'.join(f'{x:02x}' for x in mac)
+    ok, tail = peer_op(1, mac)
+    subprocess.run(['ip', '-6', 'neigh', 'del', eui64_ll(mac), 'dev', args.iface],
+                   check=False, capture_output=True, timeout=8)
+    registered.pop(mac, None)
+    print(f'{now()} peer {macs} evicted; peer_op DEL -> {tail}', flush=True)
+    return ok
+
+
+def resync():
+    """Make the firmware table match ours, which is empty, at startup.
+
+    The firmware keeps its peer entries across everything except a driver
+    reload; this process does not. Every `omdrop on` starts a new watcher
+    with an empty set, so it re-registers peers the firmware already holds
+    and fills the remaining slots with rotated MACs -- which is how a table
+    with 8 slots served 12 ADDs in one window, the last 4 failing ESPIPE.
+
+    Our own permanent neighbour entries are the record of what we added, so
+    they are what we clear. Peers still on air are re-registered by the loop
+    within a frame or two of their next transmission.
+    """
+    r = subprocess.run(['ip', '-6', 'neigh', 'show', 'dev', args.iface, 'nud', 'permanent'],
+                       check=False, capture_output=True, text=True, timeout=8)
+    stale = []
+    for line in r.stdout.splitlines():
+        parts = line.split()
+        if 'lladdr' in parts:
+            try:
+                stale.append(bytes.fromhex(parts[parts.index('lladdr') + 1].replace(':', '')))
+            except ValueError:
+                continue
+    for mac in stale:
+        peer_op(1, mac)
+        subprocess.run(['ip', '-6', 'neigh', 'del', eui64_ll(mac), 'dev', args.iface],
+                       check=False, capture_output=True, timeout=8)
+    if stale:
+        print(f'{now()} resync: released {len(stale)} peer slot(s) held from a previous window', flush=True)
+
+
 def register(mac):
     macs = ':'.join(f'{x:02x}' for x in mac)
     t0 = time.monotonic()
     ll = eui64_ll(mac)
+    # The table holds args.max_peers entries and the firmware rejects an ADD
+    # beyond that with ESPIPE. Peers rotate their MAC every few minutes, so a
+    # long window WILL reach the ceiling -- and the peer that then cannot be
+    # added is simply unreachable, with every unicast to it tossed before air.
+    # Evicting the peer heard least recently costs nothing if it is gone, and
+    # it is re-added from its next frame if it is not.
+    while len(registered) >= args.max_peers:
+        forget(next(iter(registered)))
     neighbour = subprocess.run(['ip', '-6', 'neigh', 'replace', ll, 'lladdr', macs, 'dev', args.iface,
                                 'nud', 'permanent'], check=False, timeout=8)
     if neighbour.returncode:
         print(f'{now()} peer {macs} neighbour registration failed rc={neighbour.returncode}', flush=True)
         return False
-    payload = b'\x00\x00' + mac + b'\x01' + HT_IE
-    r = subprocess.run([sys.executable, IOVAR, '-i', args.iface, 'set',
-                        'awdl_peer_op', payload.hex()], capture_output=True, text=True, timeout=8)
-    tail = (r.stdout.strip().splitlines() or [''])[-1].split('-> ')[-1]
-    ok = r.returncode == 0 and tail == 'OK'
-    print(f'{now()} peer {macs} neigh {ll} pinned; peer_op ADD -> {tail} rc={r.returncode} '
+    ok, tail = peer_op(0, mac)
+    print(f'{now()} peer {macs} neigh {ll} pinned; peer_op ADD -> {tail} rc={0 if ok else 1} '
           f'({(time.monotonic() - t0) * 1000:.0f} ms)', flush=True)
-    if not ok:
+    if ok:
+        registered[mac] = time.monotonic()
+    else:
         print(f'{now()} peer {macs} HAS NO FIRMWARE ENTRY: every unicast frame to it will be '
               f'dropped before air. Clear it with: pkexec /usr/lib/omdrop/awdl-up --reload', flush=True)
     note_peer_op(macs, ok)
     return ok
 
+
+# Insertion-ordered, so the first key is the peer heard least recently: this
+# is the eviction order. Re-inserting on every frame keeps it a true LRU.
+registered = {}
+
+
+def release(_sig=None, _frame=None):
+    """Hand the firmware its slots back when the window closes.
+
+    The table survives this process, so entries held past the end of a window
+    are dead weight the NEXT window inherits -- it starts against a table that
+    is already full and cannot add the peer it actually needs.
+
+    Best effort by design: SIGKILL, a crash or a suspend all skip this, which
+    is why resync() at startup is the guarantee and this is the courtesy. Both
+    are wanted. Releasing here keeps an idle machine from holding slots, and
+    makes the common case -- a window closed normally -- cost nothing.
+    """
+    for mac in list(registered):
+        forget(mac)
+    sys.exit(0)
+
+
+signal.signal(signal.SIGTERM, release)
+signal.signal(signal.SIGINT, release)
 
 if args.prime:
     try:
@@ -128,20 +217,24 @@ if args.prime:
 
 s = socket.socket(socket.AF_PACKET, socket.SOCK_RAW, socket.htons(ETH_P_ALL))
 s.bind((args.iface, 0))
-seen = set()
+resync()
+skipped = set()
 print(f'{now()} watching {args.iface} for new peers', flush=True)
 while True:
     frame, (_, _, pkttype, _, _) = s.recvfrom(2048)
     if pkttype == PACKET_OUTGOING or len(frame) < 12:
         continue
     src = frame[6:12]
-    if src in seen or src == OURMAC or src[0] & 1:
+    if src == OURMAC or src[0] & 1:
         continue
-    seen.add(src)
+    if src in registered:
+        # Heard again: newest in the eviction order, not a re-registration.
+        registered.pop(src)
+        registered[src] = time.monotonic()
+        continue
     if ONLY and src not in ONLY:
-        print(f'{now()} peer {src.hex(":")} seen; not in --only, skipped', flush=True)
-        continue
-    if len(seen) > args.max_peers:
-        print(f'{now()} peer {src.hex(":")} seen; not adding (max-peers {args.max_peers})', flush=True)
+        if src not in skipped:
+            skipped.add(src)
+            print(f'{now()} peer {src.hex(":")} seen; not in --only, skipped', flush=True)
         continue
     register(src)
