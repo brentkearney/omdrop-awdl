@@ -66,6 +66,31 @@ def eui64_ll(mac):
     return 'fe80::%02x%02x:%02xff:fe%02x:%02x%02x' % (b[0], b[1], b[2], b[3], b[4], b[5])
 
 
+# A peer with no firmware entry silently loses every unicast frame we send it:
+# the transmit completes FW_TOSSED and is discarded before air. The responder
+# still logs that it answered, the peer still appears in the peer table, and
+# the window still reports healthy -- so the radio looks fine while it cannot
+# reach that device at all. That is how an ESPIPE run went unnoticed long
+# enough to be mistaken for a discovery, capability-flags, TLS and certificate
+# bug in turn.
+#
+# So record it where `status` can find it rather than only in this log. Not an
+# automatic reload: recovering costs the Wi-Fi link for ~15 s, which is not a
+# decision to take behind the user's back. Reporting it is.
+DEGRADED = '/run/awdl-discoverable/peerop.degraded'
+
+
+def note_peer_op(macs, ok):
+    try:
+        if ok:
+            os.path.exists(DEGRADED) and os.remove(DEGRADED)
+            return
+        with open(DEGRADED, 'w') as fh:
+            fh.write(f'{now()} {macs}\n')
+    except OSError:
+        pass    # never let bookkeeping break registration
+
+
 def register(mac):
     macs = ':'.join(f'{x:02x}' for x in mac)
     t0 = time.monotonic()
@@ -79,9 +104,14 @@ def register(mac):
     r = subprocess.run([sys.executable, IOVAR, '-i', args.iface, 'set',
                         'awdl_peer_op', payload.hex()], capture_output=True, text=True, timeout=8)
     tail = (r.stdout.strip().splitlines() or [''])[-1].split('-> ')[-1]
+    ok = r.returncode == 0 and tail == 'OK'
     print(f'{now()} peer {macs} neigh {ll} pinned; peer_op ADD -> {tail} rc={r.returncode} '
           f'({(time.monotonic() - t0) * 1000:.0f} ms)', flush=True)
-    return r.returncode == 0 and tail == 'OK'
+    if not ok:
+        print(f'{now()} peer {macs} HAS NO FIRMWARE ENTRY: every unicast frame to it will be '
+              f'dropped before air. Clear it with: pkexec /usr/lib/omdrop/awdl-up --reload', flush=True)
+    note_peer_op(macs, ok)
+    return ok
 
 
 if args.prime:

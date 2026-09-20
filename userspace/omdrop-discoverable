@@ -771,12 +771,20 @@ cmd_status(){
     visible=false; remaining=null
     [[ $reason == ok || $reason == unproven ]] && reason=expired
   fi
+  # A peer whose firmware entry is missing loses every unicast frame we send
+  # it, before air. Advertising is then true and useless for that device, so
+  # the window must not report a bare "ok": on 2026-09-19 an ESPIPE run made
+  # two Macs undiscoverable for hours while every surface here said healthy.
+  local peerop=ok
+  [[ -e $RUN/peerop.degraded ]] && peerop=degraded
+  [[ $peerop == degraded && $reason == ok ]] && reason=peer_op_failed
   if [[ ${1:-} == --json ]]; then
-    printf '{"visible":%s,"remaining":%s,"reason":"%s","rx_proven":%s}\n' \
-      "$visible" "$remaining" "$reason" "$([[ $rxp == 1 ]] && echo true || echo false)"
+    printf '{"visible":%s,"remaining":%s,"reason":"%s","rx_proven":%s,"peer_op":"%s"}\n' \
+      "$visible" "$remaining" "$reason" "$([[ $rxp == 1 ]] && echo true || echo false)" "$peerop"
   else
-    printf 'visible=%s remaining=%s reason=%s rx_proven=%s\n' \
-      "$visible" "$remaining" "$reason" "$([[ $rxp == 1 ]] && echo true || echo false)"
+    printf 'visible=%s remaining=%s reason=%s rx_proven=%s peer_op=%s\n' \
+      "$visible" "$remaining" "$reason" "$([[ $rxp == 1 ]] && echo true || echo false)" "$peerop"
+    [[ $peerop == degraded ]] && printf 'peer_op ADD is failing: some devices cannot see you and will not receive anything you send.\nClear it with: pkexec /usr/lib/omdrop/awdl-up --reload\n' >&2
   fi
   exit 0
 }
