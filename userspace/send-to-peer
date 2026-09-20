@@ -18,6 +18,7 @@ Peers come from `awdl-discoverable peers`, which needs root, so this runs it
 through pkexec. Everything else runs as you.
 """
 import argparse
+import concurrent.futures
 import os
 import re
 import socket
@@ -117,6 +118,38 @@ def listening(host, port, timeout=2.0):
         s.close()
 
 
+def peer_name(mac, port, sender_name, timeout=8.0):
+    """Ask one peer what it calls itself.
+
+    Returns the name, "" when the peer answered without naming itself, and
+    None when it did not answer at all. Those are different facts and a person
+    reading a listing needs to tell them apart: an iPhone only keeps its
+    AirDrop server up in bursts, so "not listening" is routine and says
+    nothing about whether the peer would accept a file a moment later.
+
+    Runs the sender in --discover-only mode rather than reimplementing the
+    request: the identity record, the TLS material and the /Discover body all
+    live there, and a second copy of them would drift.
+    """
+    target = f"[{link_local(mac)}%{IFACE}]:{port}"
+    try:
+        r = subprocess.run([sys.executable, SENDER, "--direct", target,
+                            "--discover-only", "--name", sender_name,
+                            "--op-timeout", str(timeout)],
+                           capture_output=True, text=True, timeout=timeout + 4)
+    except subprocess.TimeoutExpired:
+        return None
+    return r.stdout.strip() if r.returncode == 0 else None
+
+
+def peer_names(macs, port, sender_name):
+    """Name every peer at once. Serially this costs seconds per peer, and a
+    listing is something a person waits on."""
+    with concurrent.futures.ThreadPoolExecutor(max_workers=max(1, len(macs))) as pool:
+        futures = {pool.submit(peer_name, m, port, sender_name): m for m in macs}
+        return {futures[f]: f.result() for f in concurrent.futures.as_completed(futures)}
+
+
 def main():
     ap = argparse.ArgumentParser(description=__doc__,
                                  formatter_class=argparse.RawDescriptionHelpFormatter)
@@ -132,6 +165,15 @@ def main():
     ap.add_argument("--wait", type=float, default=0.0, metavar="SECONDS",
                     help="poll the peer's port and send the moment it opens; "
                          "an iPhone only listens in bursts")
+    # -n, not --name: --name is already the SenderComputerName this machine
+    # presents. A peer's own name is not advertised anywhere -- AirDrop's mDNS
+    # instance is a random 12-hex id -- so the only way to learn it is to ask
+    # the peer over /Discover. That is an outbound connection which shows this
+    # machine's identity to every device in range, so it is opt-in and never
+    # happens on a bare listing.
+    ap.add_argument("-n", "--names", action="store_true",
+                    help="ask each peer for its name over /Discover (reveals this "
+                         "machine to every peer listed)")
     args = ap.parse_args()
 
     try:
@@ -144,8 +186,16 @@ def main():
             print("the peer table is empty: nobody is advertising within earshot. "
                   "A window has to be open for the peer watcher to fill it.")
             return 1
+        names = peer_names([m for m, _ in heard], args.port, args.name) if args.names else {}
         for mac, rssi in heard:
-            print(f"{mac}  {rssi:>4} dBm  [{link_local(mac)}%{IFACE}]:{args.port}")
+            line = f"{mac}  {rssi:>4} dBm  [{link_local(mac)}%{IFACE}]:{args.port}"
+            if args.names:
+                # Three outcomes, three words. A blank column would make
+                # "asleep" and "would not say" look identical, and only one of
+                # them means you cannot send right now.
+                got = names.get(mac)
+                line += f"  {got if got else '(anonymous)' if got == '' else '(not listening)'}"
+            print(line)
         return 0
 
     if not args.file:
