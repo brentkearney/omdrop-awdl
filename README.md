@@ -132,9 +132,11 @@ pkexec /usr/lib/omdrop/omdrop-discoverable trace off
 
 `omdrop peers -n` asks each peer for its name over `/Discover`. A name is not advertised anywhere — an AirDrop mDNS instance is a random 12-hex id — so the only source is the peer's own answer, and that needs a TCP connection to its AirDrop port.
 
-**An Apple device runs no AirDrop listener unless it is actively receiving.** Measured on a Mac 2026-09-20: with its share sheet open and this host tiled in it, `lsof -nP -a -c sharingd -iTCP -sTCP:LISTEN` was empty and nothing was bound to 8770 or 8771. Sharing *to* someone does not open a listener; being discoverable for receiving does.
+A device answers only while it is ready to receive. Measured 2026-09-20: of eight peers within range, the one with Finder → AirDrop open answered on 8770 and named itself; the rest did not answer at all.
 
-So `(not receiving)` is a fact about the peer, not a failure here. No other Mac could name it either. To see a name, put the other device into receive mode: on macOS open Finder → AirDrop and leave it open; on iOS open the share sheet, which brings its listener up in bursts.
+`(no response)` says exactly that much. Nothing answered on the AirDrop port, and the cause is not distinguishable from here — a device that is not receiving produces it, and so does one restarting its Bonjour server mid-handshake. To see a name, put the other device into receive mode: on macOS open Finder → AirDrop and leave it open; on iOS open the share sheet, which brings its listener up in bursts.
+
+A single listing is reliable. Repeated lookups in quick succession are not: every connection makes the peer restart its server, so a tight loop degrades where one listing succeeds.
 
 `(anonymous)` is different — the peer answered but withheld its name, which it does when it does not recognize the sender.
 

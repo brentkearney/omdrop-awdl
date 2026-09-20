@@ -266,15 +266,14 @@ def main():
                 # "not receiving" and "would not say" look identical, and only
                 # one of them means you cannot send right now.
                 #
-                # An Apple device runs NO AirDrop listener unless it is
-                # actively receiving: measured on a Mac 2026-09-20, with its
-                # share sheet open and this host tiled in it, `lsof -iTCP
-                # -sTCP:LISTEN -c sharingd` was empty and nothing was bound to
-                # 8770 or 8771. So a name is unobtainable for a device that is
-                # merely nearby, by us or by another Mac, and "(not receiving)"
-                # is the fact rather than a failure on our side.
+                # "(no response)", not "(not receiving)": all we observe is
+                # that nothing answered on the AirDrop port, and the causes are
+                # not distinguishable from here. A device that is not receiving
+                # produces this, but so does one mid-restart of its Bonjour
+                # server, and claiming to know which would be inventing a
+                # diagnosis out of a timeout.
                 got = names.get(mac)
-                line += f"  {got if got else '(anonymous)' if got == '' else '(not receiving)'}"
+                line += f"  {got if got else '(anonymous)' if got == '' else '(no response)'}"
             print(line)
         return 0
 
