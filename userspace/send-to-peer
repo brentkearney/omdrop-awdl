@@ -97,7 +97,11 @@ def peers():
 
 def registered_peers():
     """MACs the peer watcher has pinned on awdl0 this window. Needs no root."""
-    run = subprocess.run(["ip", "-6", "neigh", "show", "dev", IFACE],
+    # nud permanent, because that is what the watcher writes. Without the
+    # filter this also returns FAILED entries the kernel created from our own
+    # unanswered probes, which then appear in the listing as peers that were
+    # never registered and are not there.
+    run = subprocess.run(["ip", "-6", "neigh", "show", "dev", IFACE, "nud", "permanent"],
                          capture_output=True, text=True)
     return re.findall(r"lladdr\s+([0-9a-f]{2}(?::[0-9a-f]{2}){5})", run.stdout)
 
