@@ -138,6 +138,8 @@ So `(not receiving)` is a fact about the peer, not a failure here. No other Mac 
 
 `(anonymous)` is different — the peer answered but withheld its name, which it does when it does not recognize the sender.
 
+A lookup is retried once, because the first connection to an Apple peer is often destroyed in flight. Even so, expect the occasional `(not receiving)` from a device that is receiving: measured against a receiving Mac 2026-09-20, 5 of 6 listings named it and the sixth timed out on both attempts. The listener flaps; run it again.
+
 ### The firmware peer table holds eight entries
 
 `awdl_maxpeers` reads **8**, and the firmware rejects a ninth `awdl_peer_op ADD` with `ESPIPE`. A peer with no entry silently loses every unicast frame we send it — the transmit completes `FW_TOSSED` before it reaches the air — so it cannot discover this host and cannot receive from it, while every local surface still looks healthy.
