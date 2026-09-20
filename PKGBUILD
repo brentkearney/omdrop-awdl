@@ -10,7 +10,7 @@
 
 pkgname=brcmfmac-awdl-dkms
 pkgver=0.3.0
-pkgrel=1
+pkgrel=2
 _asahitag=asahi-7.1.13-2
 pkgdesc="AWDL (AirDrop link layer) support for the BCM4387: DKMS module and root helpers"
 arch=('aarch64')
