@@ -138,7 +138,9 @@ Apple devices rotate their AWDL MAC every few minutes, and each rotation is a ne
 - on `SIGTERM`, so an idle machine is not holding slots it has no use for;
 - at capacity, evicting the peer heard least recently. Hearing a peer again refreshes it, so an active device is never evicted in favour of a stale one.
 
-If `omdrop-discoverable status` still reports `peer_op=degraded` after this, the table is genuinely full of peers that are all currently audible. `--only` restricts registration to named MACs, which is the right answer in a crowded room.
+**Known limitation: eight is a low ceiling in a busy room.** Three Apple devices rotating their MACs work through eight slots in minutes. Eviction turns that from a hard failure into churn — the device you are actively talking to stays resident, because hearing it refreshes its position — but a device that has been quiet for a while can be dropped and has to be re-registered from its next frame, which shows up as a tile that comes and goes. Nothing on screen explains it. `--only` restricts registration to named MACs and is the right lever when it matters.
+
+If `omdrop-discoverable status` reports `peer_op=degraded`, the table is full of peers that are all currently audible.
 
 ## Configuration
 
