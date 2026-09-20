@@ -128,6 +128,18 @@ pkexec /usr/lib/omdrop/omdrop-discoverable trace off
 
 `trace` toggles the `awdl_trace` module parameter, which gates the per-frame `awdl txstatus` and `awdl af rx` lines. Off by default, because a window submits 40 frames per interval. With it on, `tx_status=0x0000` is a frame the receiver acknowledged and `0x0003` is one the firmware discarded before it reached the air — the difference between a peer that cannot hear us and a peer we never registered.
 
+### The firmware peer table holds eight entries
+
+`awdl_maxpeers` reads **8**, and the firmware rejects a ninth `awdl_peer_op ADD` with `ESPIPE`. A peer with no entry silently loses every unicast frame we send it — the transmit completes `FW_TOSSED` before it reaches the air — so it cannot discover this host and cannot receive from it, while every local surface still looks healthy.
+
+Apple devices rotate their AWDL MAC every few minutes, and each rotation is a new entry. The peer watcher therefore releases slots rather than only claiming them:
+
+- at startup, so a window never inherits a full table from a window that crashed, was killed, or was cut short by suspend;
+- on `SIGTERM`, so an idle machine is not holding slots it has no use for;
+- at capacity, evicting the peer heard least recently. Hearing a peer again refreshes it, so an active device is never evicted in favour of a stale one.
+
+If `omdrop-discoverable status` still reports `peer_op=degraded` after this, the table is genuinely full of peers that are all currently audible. `--only` restricts registration to named MACs, which is the right answer in a crowded room.
+
 ## Configuration
 
 Nothing is required. Every tunable has a working default, and the helpers read the machine's own MAC, Wi-Fi interface and hostname at runtime rather than carrying a baked-in copy. To override one, drop a one-line file in `/etc/omdrop/`:
