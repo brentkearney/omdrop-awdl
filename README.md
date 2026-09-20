@@ -128,6 +128,16 @@ pkexec /usr/lib/omdrop/omdrop-discoverable trace off
 
 `trace` toggles the `awdl_trace` module parameter, which gates the per-frame `awdl txstatus` and `awdl af rx` lines. Off by default, because a window submits 40 frames per interval. With it on, `tx_status=0x0000` is a frame the receiver acknowledged and `0x0003` is one the firmware discarded before it reached the air — the difference between a peer that cannot hear us and a peer we never registered.
 
+### A peer can only be named while it is receiving
+
+`omdrop peers -n` asks each peer for its name over `/Discover`. A name is not advertised anywhere — an AirDrop mDNS instance is a random 12-hex id — so the only source is the peer's own answer, and that needs a TCP connection to its AirDrop port.
+
+**An Apple device runs no AirDrop listener unless it is actively receiving.** Measured on a Mac 2026-09-20: with its share sheet open and this host tiled in it, `lsof -nP -a -c sharingd -iTCP -sTCP:LISTEN` was empty and nothing was bound to 8770 or 8771. Sharing *to* someone does not open a listener; being discoverable for receiving does.
+
+So `(not receiving)` is a fact about the peer, not a failure here. No other Mac could name it either. To see a name, put the other device into receive mode: on macOS open Finder → AirDrop and leave it open; on iOS open the share sheet, which brings its listener up in bursts.
+
+`(anonymous)` is different — the peer answered but withheld its name, which it does when it does not recognize the sender.
+
 ### The firmware peer table holds eight entries
 
 `awdl_maxpeers` reads **8**, and the firmware rejects a ninth `awdl_peer_op ADD` with `ESPIPE`. A peer with no entry silently loses every unicast frame we send it — the transmit completes `FW_TOSSED` before it reaches the air — so it cannot discover this host and cannot receive from it, while every local surface still looks healthy.

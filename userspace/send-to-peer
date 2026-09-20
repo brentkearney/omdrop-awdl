@@ -216,10 +216,18 @@ def main():
             line = f"{mac}  {signal(rssi)}  [{link_local(mac)}%{IFACE}]:{args.port}"
             if args.names:
                 # Three outcomes, three words. A blank column would make
-                # "asleep" and "would not say" look identical, and only one of
-                # them means you cannot send right now.
+                # "not receiving" and "would not say" look identical, and only
+                # one of them means you cannot send right now.
+                #
+                # An Apple device runs NO AirDrop listener unless it is
+                # actively receiving: measured on a Mac 2026-09-20, with its
+                # share sheet open and this host tiled in it, `lsof -iTCP
+                # -sTCP:LISTEN -c sharingd` was empty and nothing was bound to
+                # 8770 or 8771. So a name is unobtainable for a device that is
+                # merely nearby, by us or by another Mac, and "(not receiving)"
+                # is the fact rather than a failure on our side.
                 got = names.get(mac)
-                line += f"  {got if got else '(anonymous)' if got == '' else '(not listening)'}"
+                line += f"  {got if got else '(anonymous)' if got == '' else '(not receiving)'}"
             print(line)
         return 0
 
