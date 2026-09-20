@@ -164,8 +164,34 @@ def peer_name(mac, port, sender_name, timeout=8.0):
     # material and two attempts, and for a device that is not receiving all of
     # that is spent to learn what one refused connection says in a moment:
     # six peers took 49 s before this, and under 2 s after.
-    if not listening(link_local(mac), port, timeout=1.5):
-        return None
+    # Twice: a single 1.5 s knock is not a reliable test of a listening peer.
+    # Measured against a Mac with sharingd bound to *:8770, one knock in six
+    # timed out and the lookup reported a receiving device as absent without
+    # ever asking it. Two knocks cost an absent peer 3 s instead of 1.5 s,
+    # which is still a listing in seconds rather than the 49 s it took before
+    # any knock existed.
+    # Even two knocks miss: measured 1 in 8 against a Mac with sharingd bound
+    # to *:8770, because the knock lands while it is restarting its Bonjour
+    # server. So a failed knock downgrades the budget rather than deciding the
+    # answer -- one ask is still made, because reporting a receiving device as
+    # absent without asking it is the error that matters. An absent peer pays
+    # a few seconds; a present one is never dismissed unasked.
+    # 3 s, not 1.5: the FIRST connection to an idle Mac takes about a second
+    # and sometimes longer, while every one after it returns instantly. A 1.5 s
+    # knock therefore failed against a peer that was plainly listening -- 3 of 8
+    # lookups reported a receiving device as absent -- and the cost of being
+    # wrong here is a device you cannot name or send to.
+    knocked = any(listening(link_local(mac), port, timeout=3.0) for _ in range(2))
+    # A peer that answered a knock gets the full budget; one that ignored two
+    # gets a single short ask, so a listing of absent devices stays in seconds.
+    attempts, timeout = (3, timeout) if knocked else (1, 3.0)
+    # The knock above is not free: macOS accepts it, classes us a legacy peer,
+    # restarts its Bonjour server and kills that connection -- so the knock
+    # spends the sacrificial first connection and the restart then lands on the
+    # retry. Measured against a listening Mac: knock plus two attempts named it
+    # 3 times in 4, while two attempts with no knock named it 4 in 4. Three
+    # attempts after a successful knock restores it without giving up the
+    # speed, which is what the knock was for.
     target = f"[{link_local(mac)}%{IFACE}]:{port}"
     # Twice, because the first attempt to an Apple peer is unreliable: macOS
     # accepts on identity, restarts its Bonjour server for a peer it classes as
@@ -173,7 +199,7 @@ def peer_name(mac, port, sender_name, timeout=8.0):
     # milliseconds later. Measured against a receiving Mac 2026-09-20: 6 of 8
     # first attempts answered, 8 of 8 within two, and none needed a third. One
     # retry is the difference between a name and a device that looks asleep.
-    for attempt in (1, 2):
+    for attempt in range(attempts):
         try:
             r = subprocess.run([sys.executable, SENDER, "--direct", target,
                                 "--discover-only", "--name", sender_name,
