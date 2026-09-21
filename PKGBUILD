@@ -9,7 +9,7 @@
 # AWDL, never the network.
 
 pkgname=brcmfmac-awdl-dkms
-pkgver=0.3.2
+pkgver=0.4.0
 pkgrel=1
 _asahitag=asahi-7.1.13-3
 pkgdesc="AWDL (AirDrop link layer) support for the BCM4387: DKMS module and root helpers"
@@ -25,9 +25,13 @@ makedepends=()        # prepare() patches with patch(1), which base-devel has
 optdepends=('linux-asahi-headers: build against the Asahi kernel'
             'networkmanager: keeps awdl0 unmanaged and settles the Wi-Fi MAC before awdl0 is derived from it'
             'opendrop: the AirDrop receiver the omdrop plugin runs on top of this (AUR; there is no python-opendrop)'
-            'bluez: the opt-in BLE Continuity advert'
-            'python-dbus: the opt-in BLE Continuity advert'
-            'python-gobject: the opt-in BLE Continuity advert')
+            # Naming a peer wakes it with a BLE Continuity advert, so these
+            # are what `send-to-peer --list --names` needs to reach a device
+            # set to Contacts Only. Still optional: without them the lookup
+            # says so and names whatever is already listening.
+            'bluez: waking a peer to ask its name, and the opt-in advert'
+            'python-dbus: waking a peer to ask its name, and the opt-in advert'
+            'python-gobject: waking a peer to ask its name, and the opt-in advert')
 install="${pkgname}.install"
 
 # The three directories DKMS actually compiles, vendored pristine from Asahi's
