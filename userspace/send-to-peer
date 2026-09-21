@@ -206,16 +206,40 @@ def peer_name(mac, port, sender_name, timeout=8.0):
     # first attempts answered, 8 of 8 within two, and none needed a third. One
     # retry is the difference between a name and a device that looks asleep.
     for attempt in range(attempts):
+        t0 = time.time()
         try:
             r = subprocess.run([sys.executable, SENDER, "--direct", target,
                                 "--discover-only", "--name", sender_name,
                                 "--op-timeout", str(timeout)],
                                capture_output=True, text=True, timeout=timeout + 4)
+            rc, err = r.returncode, (r.stderr or "").strip().splitlines()[-1:] 
         except subprocess.TimeoutExpired:
-            continue
-        if r.returncode == 0:
+            rc, err, r = None, ["subprocess timeout"], None
+        _trace(mac, attempt + 1, knocked, t0, rc, err)
+        if r is not None and r.returncode == 0:
             return r.stdout.strip()
     return None
+
+
+def _trace(mac, attempt, knocked, t0, rc, err):
+    """Append one line per attempt when OMDROP_NAME_LOG names a file.
+
+    Off unless asked for, and it changes no decision: the receiver operator
+    needs per-attempt UTC bounds, return codes and stderr to line our failures
+    up against their accepts, TLS errors and DISCOVER events, and the return
+    value alone throws all of that away.
+    """
+    path = os.environ.get("OMDROP_NAME_LOG")
+    if not path:
+        return
+    fmt = "%Y-%m-%dT%H:%M:%S.%fZ"
+    line = (f"{time.strftime(fmt[:-3], time.gmtime(t0))}Z..{time.strftime(fmt[:-3], time.gmtime())}Z "
+            f"mac={mac} attempt={attempt} knocked={int(knocked)} rc={rc} err={err}\n")
+    try:
+        with open(path, "a") as fh:
+            fh.write(line)
+    except OSError:
+        pass
 
 
 def peer_names(macs, port, sender_name):
