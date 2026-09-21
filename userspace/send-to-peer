@@ -22,6 +22,10 @@ import concurrent.futures
 import contextlib
 import os
 import re
+import select
+# `signal` is taken by the dBm formatter below, and a module shadowed by a
+# function defined 200 lines later fails only at the moment it is used.
+import signal as signals
 import socket
 import subprocess
 import sys
@@ -35,7 +39,71 @@ RECORD = os.path.expanduser("~/.opendrop/keys/validation_record.cms")
 AIRDROP_PORT = 8770
 IFACE = "awdl0"
 WAKE_SECONDS = 30      # ceiling; the advert dies with the listing either way
-WAKE_SETTLE = 2.0      # hume bound 8770 23 ms after recognizing our advert
+WAKE_READY = 5.0       # how long to wait for the advertiser to say it registered
+WAKE_SETTLE = 1.0      # hume bound 8770 23 ms after recognizing our advert
+
+
+def _wake_start():
+    """Start the advert and wait for BlueZ to accept it, or explain why not.
+
+    Returns (proc, note). A note is a redacted one-line reason the wake did
+    not happen; None means it did. The advertiser prints `START ...` once
+    LEAdvertisingManager1 has taken the advertisement and `REGISTER FAILED`
+    when it has not, so registration is observed rather than assumed -- a live
+    pid proves only that python started, and a D-Bus or identity error would
+    otherwise look exactly like a working wake.
+    """
+    if not os.path.exists(ADVERTISER):
+        return None, None                      # not installed; nothing to say
+    if not os.path.exists(RECORD):
+        return None, None                      # no Apple identity; nothing to send
+    try:
+        proc = subprocess.Popen(
+            [sys.executable, ADVERTISER, "--arm", "A", "--hashes-from-record",
+             "--seconds", str(WAKE_SECONDS), "--interval-ms", "100"],
+            stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True)
+    except OSError as e:
+        return None, f"wake not started: {e.strerror}"
+
+    # The advertiser redacts hash bytes itself, so its lines are safe to show.
+    # An interrupt anywhere below would otherwise strand a transmitting child
+    # the caller has never seen: the pid lives in this frame until it returns.
+    try:
+        deadline = time.monotonic() + WAKE_READY
+        last = ""
+        while time.monotonic() < deadline:
+            if proc.poll() is not None:
+                # Whatever it said last is the reason it is gone; a line
+                # already read is not in the pipe any more, so keep it as we go.
+                rest = (proc.stdout.read() or "").strip().splitlines()
+                proc.wait()
+                return None, f"wake exited: {rest[-1] if rest else last or 'no output'}"
+            if select.select([proc.stdout], [], [], max(0.0, deadline - time.monotonic()))[0]:
+                line = proc.stdout.readline()
+                if not line:
+                    continue
+                last = line.strip()
+                if " START " in line:
+                    time.sleep(WAKE_SETTLE)
+                    return proc, None
+                if "FAILED" in line:
+                    return proc, f"wake not advertising: {last}"
+        return proc, f"wake did not register within {WAKE_READY:.0f}s"
+    except BaseException:
+        _wake_stop(proc)
+        raise
+
+
+def _wake_stop(proc):
+    """Stop the advert and reap it, so BlueZ drops the advertisement now."""
+    if proc is None or proc.poll() is not None:
+        return
+    proc.terminate()
+    try:
+        proc.wait(timeout=5)
+    except subprocess.TimeoutExpired:
+        proc.kill()
+        proc.wait()
 
 
 @contextlib.contextmanager
@@ -50,34 +118,38 @@ def wake():
     .666, and the same listing that had failed all day returned the peer's
     name. Without this, `-n` works only against a device something else woke.
 
-    Bounded on purpose. The advert is a child of this process with an explicit
-    --seconds, it is killed when the listing ends however it ends, and it
-    writes no setting: nothing here leaves a machine advertising after the
-    command that asked for it has exited.
+    Bounded on purpose, and the bound must survive an interrupt: everything
+    from the spawn onwards is inside the try, because a Ctrl-C during startup
+    used to leave the advert running until its own --seconds expired. SIGTERM
+    is turned into SystemExit for the same reason -- the default disposition
+    kills this process without unwinding, orphaning a radio that is
+    transmitting.
 
-    Silent when it cannot run. No Apple identity means no hashes worth sending,
-    and a machine without BlueZ still names a peer that some other device has
-    already woken -- neither is a reason to fail a listing.
+    Silent when there is nothing to run: no Apple identity means no hashes
+    worth sending, and a machine without the advertiser still names a peer
+    something else has woken. A wake that was supposed to work and did not is
+    the opposite case, and says so on stderr.
     """
     proc = None
-    if os.path.exists(RECORD) and os.path.exists(ADVERTISER):
-        try:
-            proc = subprocess.Popen(
-                [sys.executable, ADVERTISER, "--arm", "A", "--hashes-from-record",
-                 "--seconds", str(WAKE_SECONDS), "--interval-ms", "100"],
-                stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
-            time.sleep(WAKE_SETTLE)
-        except OSError:
-            proc = None
+    previous = signals.getsignal(signals.SIGTERM)
+
+    def _term(*_):
+        raise SystemExit(143)
+
     try:
-        yield proc is not None
+        signals.signal(signals.SIGTERM, _term)
+    except ValueError:
+        previous = None                        # not the main thread; nothing to restore
+    try:
+        proc, note = _wake_start()
+        if note:
+            print(f"{note}; naming peers that are already listening",
+                  file=sys.stderr)
+        yield proc is not None and not note
     finally:
-        if proc is not None:
-            proc.terminate()
-            try:
-                proc.wait(timeout=5)
-            except subprocess.TimeoutExpired:
-                proc.kill()
+        _wake_stop(proc)
+        if previous is not None:
+            signals.signal(signals.SIGTERM, previous)
 
 
 def link_local(mac):
