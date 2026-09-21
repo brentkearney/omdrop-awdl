@@ -40,7 +40,11 @@ AIRDROP_PORT = 8770
 IFACE = "awdl0"
 WAKE_SECONDS = 30      # ceiling; the advert dies with the listing either way
 WAKE_READY = 5.0       # how long to wait for the advertiser to say it registered
-WAKE_SETTLE = 1.0      # hume bound 8770 23 ms after recognizing our advert
+# Not a sleep. The receiver binds its port in milliseconds; reaching it took
+# 14.8 s in the run that worked, so the knock keeps trying to this deadline
+# instead of guessing how long to wait. Matched to the advert's own ceiling:
+# there is nothing to wait for once we stop transmitting.
+WAKE_WINDOW = float(WAKE_SECONDS)
 
 
 def _wake_start():
@@ -87,7 +91,8 @@ def _wake_start():
                     continue
                 last = line
                 if " START " in line:
-                    time.sleep(WAKE_SETTLE)
+                    # Registration is the start of the window, not a moment to
+                    # sleep through: the peers are polled from here.
                     return proc, None
                 if "FAILED" in line:
                     return proc, f"wake not advertising: {last}"
@@ -167,7 +172,10 @@ def wake():
         if note:
             print(f"{note}; naming peers that are already listening",
                   file=sys.stderr)
-        yield proc is not None and not note
+        # The deadline the probes may wait until, absolute and monotonic so it
+        # cannot drift with how long anything else takes. None means no wake of
+        # ours is up, and there is nothing to wait for.
+        yield (time.monotonic() + WAKE_WINDOW) if proc is not None and not note else None
     finally:
         _wake_stop(proc)
         if previous is not None:
@@ -288,7 +296,35 @@ def listening(host, port, timeout=2.0):
         s.close()
 
 
-def peer_name(mac, port, sender_name, timeout=8.0):
+def _knock(host, port, ready_by=None):
+    """Wait for a peer's AirDrop port to answer, up to an absolute deadline.
+
+    Two knocks when there is no deadline, which is what --no-wake and a failed
+    advert get: without a wake of our own there is nothing to wait for, and an
+    absent peer should cost a listing seconds rather than half a minute.
+
+    With a deadline, every socket wait is capped by the time left, so this can
+    overrun neither the wake's own ceiling nor the caller's cap. A refusal
+    comes back instantly and means the stack is there and the service is not,
+    so it is paced rather than spun on.
+    """
+    if ready_by is None:
+        return any(listening(host, port, timeout=3.0) for _ in range(2))
+    while True:
+        left = ready_by - time.monotonic()
+        if left <= 0:
+            return False
+        t0 = time.monotonic()
+        if listening(host, port, timeout=min(3.0, left)):
+            return True
+        # An immediate answer means a refusal, not a timeout: sleep the
+        # difference so a refusing peer is polled, not hammered.
+        spent = time.monotonic() - t0
+        if spent < 1.0:
+            time.sleep(min(1.0 - spent, max(0.0, ready_by - time.monotonic())))
+
+
+def peer_name(mac, port, sender_name, timeout=8.0, ready_by=None):
     """Ask one peer what it calls itself.
 
     Returns the name, "" when the peer answered without naming itself, and
@@ -322,7 +358,17 @@ def peer_name(mac, port, sender_name, timeout=8.0):
     # knock therefore failed against a peer that was plainly listening -- 3 of 8
     # lookups reported a receiving device as absent -- and the cost of being
     # wrong here is a device you cannot name or send to.
-    knocked = any(listening(link_local(mac), port, timeout=3.0) for _ in range(2))
+    #
+    # ready_by extends that reasoning to a peer we have just woken. The BLE
+    # advert is recognized in milliseconds -- hume started its server 0.45 s
+    # into the failing call of 2026-09-21T19:23 -- but REACHING the port it
+    # binds is a different matter: in the successful run of 19:03 the knock
+    # did not answer until 14.8 s after the advert went up, on a listener the
+    # receiver's log shows was bound within a millisecond of recognition. So
+    # the knock keeps trying until an absolute deadline rather than twice: the
+    # bind is instant, the path is not, and two knocks inside seven seconds is
+    # how the cold call of 19:23 reported two woken peers as absent.
+    knocked = _knock(link_local(mac), port, ready_by)
     # A peer that answered a knock gets the full budget; one that ignored two
     # gets a single short ask, so a listing of absent devices stays in seconds.
     attempts, timeout = (3, timeout) if knocked else (1, 3.0)
@@ -388,13 +434,16 @@ def peer_names(macs, port, sender_name, with_wake=True):
     listing is something a person waits on.
 
     The wake wraps the whole batch rather than each peer: one advert reaches
-    every device in range, and the probes are concurrent anyway.
+    every device in range, and the probes are concurrent anyway. They share one
+    absolute deadline for the same reason -- it is the advert that is running
+    out, not each peer's patience -- so a slow peer cannot push the listing
+    past the moment we stop transmitting.
     """
     with contextlib.ExitStack() as stack:
-        if with_wake:
-            stack.enter_context(wake())
+        ready_by = stack.enter_context(wake()) if with_wake else None
         with concurrent.futures.ThreadPoolExecutor(max_workers=max(1, len(macs))) as pool:
-            futures = {pool.submit(peer_name, m, port, sender_name): m for m in macs}
+            futures = {pool.submit(peer_name, m, port, sender_name, ready_by=ready_by): m
+                       for m in macs}
             return {futures[f]: f.result() for f in concurrent.futures.as_completed(futures)}
 
 
