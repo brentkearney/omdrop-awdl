@@ -19,6 +19,7 @@ through pkexec. Everything else runs as you.
 """
 import argparse
 import concurrent.futures
+import contextlib
 import os
 import re
 import socket
@@ -29,8 +30,54 @@ import time
 TOOLS = os.path.dirname(os.path.abspath(__file__))
 HELPER = os.path.join(TOOLS, "omdrop-discoverable")
 SENDER = os.path.join(TOOLS, "airdrop-send.py")
+ADVERTISER = os.path.join(TOOLS, "ble-airdrop-adv.py")
+RECORD = os.path.expanduser("~/.opendrop/keys/validation_record.cms")
 AIRDROP_PORT = 8770
 IFACE = "awdl0"
+WAKE_SECONDS = 30      # ceiling; the advert dies with the listing either way
+WAKE_SETTLE = 2.0      # hume bound 8770 23 ms after recognizing our advert
+
+
+@contextlib.contextmanager
+def wake():
+    """Advertise ourselves over BLE for as long as we are asking peers to talk.
+
+    A Contacts Only device keeps its AirDrop server shut until a sender's BLE
+    Continuity advert presents contact hashes it recognizes. Measured against a
+    Mac on 2026-09-21: with zero hashes it logged the advert UNRECOGNIZED and
+    started nothing, so every lookup got a refusal or silence; with this
+    account's own hashes it recognized them at 19:03:18.644, bound 8770 at
+    .666, and the same listing that had failed all day returned the peer's
+    name. Without this, `-n` works only against a device something else woke.
+
+    Bounded on purpose. The advert is a child of this process with an explicit
+    --seconds, it is killed when the listing ends however it ends, and it
+    writes no setting: nothing here leaves a machine advertising after the
+    command that asked for it has exited.
+
+    Silent when it cannot run. No Apple identity means no hashes worth sending,
+    and a machine without BlueZ still names a peer that some other device has
+    already woken -- neither is a reason to fail a listing.
+    """
+    proc = None
+    if os.path.exists(RECORD) and os.path.exists(ADVERTISER):
+        try:
+            proc = subprocess.Popen(
+                [sys.executable, ADVERTISER, "--arm", "A", "--hashes-from-record",
+                 "--seconds", str(WAKE_SECONDS), "--interval-ms", "100"],
+                stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+            time.sleep(WAKE_SETTLE)
+        except OSError:
+            proc = None
+    try:
+        yield proc is not None
+    finally:
+        if proc is not None:
+            proc.terminate()
+            try:
+                proc.wait(timeout=5)
+            except subprocess.TimeoutExpired:
+                proc.kill()
 
 
 def link_local(mac):
@@ -242,12 +289,19 @@ def _trace(mac, attempt, knocked, t0, rc, err):
         pass
 
 
-def peer_names(macs, port, sender_name):
+def peer_names(macs, port, sender_name, with_wake=True):
     """Name every peer at once. Serially this costs seconds per peer, and a
-    listing is something a person waits on."""
-    with concurrent.futures.ThreadPoolExecutor(max_workers=max(1, len(macs))) as pool:
-        futures = {pool.submit(peer_name, m, port, sender_name): m for m in macs}
-        return {futures[f]: f.result() for f in concurrent.futures.as_completed(futures)}
+    listing is something a person waits on.
+
+    The wake wraps the whole batch rather than each peer: one advert reaches
+    every device in range, and the probes are concurrent anyway.
+    """
+    with contextlib.ExitStack() as stack:
+        if with_wake:
+            stack.enter_context(wake())
+        with concurrent.futures.ThreadPoolExecutor(max_workers=max(1, len(macs))) as pool:
+            futures = {pool.submit(peer_name, m, port, sender_name): m for m in macs}
+            return {futures[f]: f.result() for f in concurrent.futures.as_completed(futures)}
 
 
 def main():
@@ -276,6 +330,15 @@ def main():
     ap.add_argument("-n", "--names", action="store_true",
                     help="ask each peer for its name over /Discover (reveals this "
                          "machine to every peer listed)")
+    # The advert that makes -n work on a Contacts Only device also announces
+    # this machine's own contact hashes to everything in BLE range, for as long
+    # as the listing runs. That is what an Apple device does the moment its
+    # share sheet opens, and -n is already opt-in for the same reason -- but
+    # anyone who wants the listing without the broadcast can have it, and will
+    # get names only from devices something else has woken.
+    ap.add_argument("--no-wake", dest="wake", action="store_false",
+                    help="do not advertise over BLE while asking; names then "
+                         "resolve only for peers already listening")
     args = ap.parse_args()
 
     try:
@@ -288,7 +351,8 @@ def main():
             print("no devices found: nothing nearby is advertising. "
                   "A window has to be open for the peer watcher to fill this.")
             return 1
-        names = peer_names([m for m, _ in heard], args.port, args.name) if args.names else {}
+        names = (peer_names([m for m, _ in heard], args.port, args.name, args.wake)
+                 if args.names else {})
         for mac, rssi in heard:
             line = f"{mac}  {signal(rssi)}  [{link_local(mac)}%{IFACE}]:{args.port}"
             if args.names:
@@ -327,7 +391,7 @@ def main():
             # makes it opt-in. Here it is not optional: resolving the name IS
             # the request. It also works precisely when it matters, because a
             # device can only receive the file if it is already listening.
-            names = peer_names(known, args.port, args.name)
+            names = peer_names(known, args.port, args.name, args.wake)
             matches = [m for m, n in names.items() if n and want in n.lower()]
             if not matches:
                 named = {m: n for m, n in names.items() if n}
