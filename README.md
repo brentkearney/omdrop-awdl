@@ -128,6 +128,22 @@ pkexec /usr/lib/omdrop/omdrop-discoverable trace off
 
 `trace` toggles the `awdl_trace` module parameter, which gates the per-frame `awdl txstatus` and `awdl af rx` lines. Off by default, because a window submits 40 frames per interval. With it on, `tx_status=0x0000` is a frame the receiver acknowledged and `0x0003` is one the firmware discarded before it reached the air — the difference between a peer that cannot hear us and a peer we never registered.
 
+### A peer can only be named while it is receiving
+
+`omdrop peers -n` asks each peer for its name over `/Discover`. A name is not advertised anywhere — an AirDrop mDNS instance is a random 12-hex id — so the only source is the peer's own answer, and that needs a TCP connection to its AirDrop port.
+
+A device answers only while it is ready to receive. Measured 2026-09-20: of eight peers within range, the one with Finder → AirDrop open answered on 8770 and named itself; the rest did not answer at all.
+
+`(no response)` says exactly that much. Nothing answered on the AirDrop port, and the cause is not distinguishable from here — a device that is not receiving produces it, and so does one restarting its Bonjour server mid-handshake. To see a name, put the other device into receive mode: on macOS open Finder → AirDrop and leave it open; on iOS open the share sheet, which brings its listener up in bursts.
+
+A device reports `(no response)` when nothing answered on its AirDrop port. One measured reason is that the listener is not always up: from a receiver's own log 2026-09-20, an idle Mac started its AirDrop server four times for 19–38 s with gaps of 10–16 minutes. Opening Finder → AirDrop on the device keeps the server up, and it answers.
+
+Lookups also fail sometimes against a device whose listener is up. That cause is unresolved. If a device you expect is unnamed, run it again.
+
+`(anonymous)` is different — the peer answered but withheld its name, which it does when it does not recognize the sender.
+
+A lookup is retried once, because the first connection to an Apple peer is often destroyed in flight. Even so, expect the occasional `(not receiving)` from a device that is receiving: measured against a receiving Mac 2026-09-20, 5 of 6 listings named it and the sixth timed out on both attempts. The listener flaps; run it again.
+
 ### The firmware peer table holds eight entries
 
 `awdl_maxpeers` reads **8**, and the firmware rejects a ninth `awdl_peer_op ADD` with `ESPIPE`. A peer with no entry silently loses every unicast frame we send it — the transmit completes `FW_TOSSED` before it reaches the air — so it cannot discover this host and cannot receive from it, while every local surface still looks healthy.

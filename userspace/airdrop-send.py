@@ -67,8 +67,11 @@ if not hasattr(PIL.Image, 'ANTIALIAS'):
     PIL.Image.ANTIALIAS = PIL.Image.LANCZOS
 
 ap = argparse.ArgumentParser()
-ap.add_argument('file')
+# Optional, because --discover-only asks a peer for its name and sends nothing.
+ap.add_argument('file', nargs='?')
 ap.add_argument('--iface', default='awdl0')
+ap.add_argument('--discover-only', action='store_true',
+                help='ask the peer for its name over /Discover, print it, and send nothing')
 ap.add_argument('--to', default=None, help='receiver: substring of its name, or 12-hex id')
 ap.add_argument('--timeout', type=float, default=60, help='seconds to wait for a receiver')
 ap.add_argument('--ask-timeout', type=float, default=90, help='seconds for the Mac user to accept')
@@ -93,6 +96,14 @@ ap.add_argument('--host', default='f0010-awdl')
 ap.add_argument('--keys', default=os.path.join(pwd.getpwuid(os.getuid()).pw_dir, '.opendrop'))
 args = ap.parse_args()
 OP_TIMEOUT = args.op_timeout
+if not args.discover_only and not args.file:
+    ap.error('a file is required unless --discover-only')
+if args.discover_only and not args.direct:
+    ap.error('--discover-only needs --direct HOST:PORT, the peer to ask')
+# A name lookup is not a transfer: keep the debug stream off stdout so the
+# caller can read the name without parsing a log.
+if args.discover_only:
+    logging.basicConfig(level=logging.WARNING, stream=sys.stderr)
 
 logging.basicConfig(level=logging.DEBUG, stream=sys.stdout,
                     format='%(asctime)s %(levelname)s %(name)s: %(message)s')
@@ -331,7 +342,19 @@ if args.direct:
         log.info('%s DISCOVER %s -> %r (%.2fs)', t(), args.direct, name, time.monotonic() - t1)
     except Exception as e:
         log.info('%s DISCOVER %s failed: %r', t(), args.direct, e)
+        # --discover-only silences the debug stream, so without this the
+        # failure is invisible: no name, no reason, exit 2.
+        if args.discover_only:
+            print(f'{args.direct}: no answer ({type(e).__name__})', file=sys.stderr)
         sys.exit(2)
+    if args.discover_only:
+        # A peer that answers without naming itself is not an error: an iPhone
+        # answers /Discover with no ReceiverComputerName unless it recognizes
+        # the sender. Print nothing and exit 0, so the caller distinguishes
+        # "no name offered" from "peer did not answer" (exit 2 above).
+        if name:
+            print(name)
+        sys.exit(0)
     chosen.update(ident='direct', name=name, client=client, addr=host, port=int(port))
     found.set()
 

@@ -473,7 +473,14 @@ supervise(){
     # shares the 2.4 GHz radio with AWDL. Off unless $CONF/ble-wake exists.
     # --seconds wants a number to pace itself against; a day stands in for an
     # unbounded window, which is longer than any battery.
-    spawn ble python3 "$LIB/ble-airdrop-adv.py" --arm A --seconds "$(( secs > 0 ? secs : 86400 ))"
+    #
+    # The hashes come from our own Apple ID validation record. They used to be
+    # zeros, which means "no contact match": measured on hume 2026-09-21, a
+    # Contacts Only Mac runs a contact check on the advert and starts its
+    # AirDrop Bonjour Server 0.2 ms after recognizing the hashes, so zeros wake
+    # a receiver set to Everyone and nothing else.
+    spawn ble python3 "$LIB/ble-airdrop-adv.py" --arm A --hashes-from-record \
+      --seconds "$(( secs > 0 ? secs : 86400 ))"
   fi
   # The deadline is re-read every interval, not captured at spawn. cmd_start
   # rewrites $RUN/until when a second press extends a live window, and the
