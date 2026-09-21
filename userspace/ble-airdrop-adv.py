@@ -30,6 +30,7 @@ Prints `<epoch> <HH:MM:SSZ> START|STOP ...` lines (flush) so ble-adv.log lines
 up with af.log. Unregisters the advertisement on exit, SIGINT and SIGTERM.
 """
 import argparse
+import os
 import signal
 import time
 
@@ -58,6 +59,100 @@ def payload(arm, tlv_type, hashes, tag):
         body = bytes(8) + bytes([0x01]) + h + bytes(1)
     assert len(body) == 18
     return bytes([tlv_type, len(body)]) + body
+
+def redact(value):
+    """The advert as hex, with the contact-hash bytes masked.
+
+    Every arm puts the four 2-byte hashes at the same place -- body[9:17],
+    which is value[11:19] once the TLV type and length are in front -- so one
+    slice covers all of them. Shape, arm, version, tag, length and the trailing
+    byte stay visible, because those are the diagnostics a capture is compared
+    against; the hashes do not, because a 2-byte prefix narrows a phone number
+    and this string goes into a log file that outlives the run.
+
+    Zeros are shown as they are: they identify nobody, and seeing them is how
+    the old zero-hash behaviour was caught in the first place.
+    """
+    h = value.hex()
+    slots = h[22:38]
+    return h if set(slots) == {'0'} else h[:22] + 'xx' * 8 + h[38:]
+
+def default_record():
+    """Where the invoking user's Apple ID validation record lives.
+
+    The window supervisor runs as root through pkexec, so expanding `~` here
+    would look in /root, find nothing, and fall back to zero hashes -- an
+    advert that no Contacts Only device can match, produced silently. pkexec
+    sets PKEXEC_UID and sudo sets SUDO_UID; either names the human whose
+    identity we are advertising.
+    """
+    for var in ('PKEXEC_UID', 'SUDO_UID'):
+        uid = os.environ.get(var)
+        if uid and uid.isdigit() and int(uid) != 0:
+            import pwd
+            try:
+                home = pwd.getpwuid(int(uid)).pw_dir
+            except KeyError:
+                continue
+            return os.path.join(home, '.opendrop/keys/validation_record.cms')
+    return os.path.expanduser('~/.opendrop/keys/validation_record.cms')
+
+
+DEFAULT_RECORD = default_record()
+
+
+def hashes_from_record(path):
+    """The four 2-byte contact hashes, derived from our own Apple ID record.
+
+    Zeros mean "no contact match", which only an Everyone-mode receiver
+    accepts -- so a wake advert with zeros cannot wake a Contacts Only device,
+    and that is the whole reason this exists. The record's
+    ValidatedEmailHashes/ValidatedPhoneHashes are full SHA-256 of the
+    identifiers Apple verified for this account, and the advert carries the
+    first two bytes of each.
+
+    The signature is not checked: this is our own installed record, read to
+    learn what to say about ourselves. `install-airdrop-identity` is what
+    verifies a record against Apple's root before it is installed.
+
+    Returns hex, and nothing here ever prints a hash or an identifier: a full
+    hash is reversible to a phone number by brute force, and a prefix narrows
+    one.
+    """
+    import plistlib
+    import subprocess
+    proc = subprocess.run(
+        ['openssl', 'cms', '-verify', '-noverify', '-inform', 'DER'],
+        input=open(path, 'rb').read(), capture_output=True)
+    if proc.returncode != 0:
+        raise SystemExit(f'cannot read {path}: {proc.stderr.decode(errors="replace").strip()}')
+    plist = plistlib.loads(proc.stdout)
+    emails = [h.lower()[:4] for h in (plist.get('ValidatedEmailHashes') or []) if isinstance(h, str)]
+    phones = [h.lower()[:4] for h in (plist.get('ValidatedPhoneHashes') or []) if isinstance(h, str)]
+    if not emails and not phones:
+        raise SystemExit(f'{path} validates no identifiers; nothing to advertise')
+    # Slot order follows the genuine advert measured off the air on 2026-09-19
+    # (results/ble-cap-.../SHAPE.md): slot 0 email, slot 1 phone, slot 2 the
+    # account's Apple ID/DSID hash, slot 3 email. The DSID hash is NOT in the
+    # validation record and cannot be derived from it, so slot 2 carries
+    # another email instead. That device advertised a rotating 4-of-N subset of
+    # its identifiers rather than a fixed tuple, and the wake proven on
+    # 2026-09-19 06:30Z needed only a match, not a particular slot -- so the
+    # positions here mirror a real advert without claiming the receiver is
+    # position-sensitive.
+    slots = [emails[0:1], phones[0:1], emails[1:2], emails[2:3]]
+    # Spare identifiers of either kind fill any slot left empty, rather than
+    # advertising a zero the receiver cannot match.
+    spare = [h for h in emails[3:] + phones[1:]]
+    out = []
+    for slot in slots:
+        if slot:
+            out.append(slot[0])
+        elif spare:
+            out.append(spare.pop(0))
+        else:
+            out.append('0000')
+    return ''.join(out), len(emails) + len(phones)
 
 
 
@@ -101,17 +196,35 @@ def main():
     ap.add_argument('--tag', default=None,
                     help='3 bytes hex for arm A bytes 1-3 (the candidate SenderIdentityAuthTag); default random')
     ap.add_argument('--type', default='0x05', help='Continuity TLV type; 0x05 = AirDrop. Anything else is a plumbing test')
-    ap.add_argument('--hashes', default='00' * 8, help='four 2-byte contact hashes, hex; default zeros')
+    ap.add_argument('--hashes', default=None, help='four 2-byte contact hashes, hex; default zeros')
+    ap.add_argument('--hashes-from-record', nargs='?', const=DEFAULT_RECORD, default=None,
+                    metavar='RECORD',
+                    help=f'derive the hashes from our own Apple ID validation record (default {DEFAULT_RECORD}). '
+                         'Zeros only wake a receiver set to Everyone.')
     ap.add_argument('--seconds', type=int, default=120)
     ap.add_argument('--interval-ms', type=int, default=100)
     ap.add_argument('--broadcast', action='store_true', help='non-connectable (default: connectable, like Apple)')
     ap.add_argument('--adapter', default='hci0')
     a = ap.parse_args()
+    if a.hashes and a.hashes_from_record:
+        raise SystemExit('--hashes and --hashes-from-record are mutually exclusive')
+    identifiers = None
+    if a.hashes_from_record:
+        if os.path.exists(a.hashes_from_record):
+            a.hashes, identifiers = hashes_from_record(a.hashes_from_record)
+        else:
+            # A self-signed machine has no record and cannot do Contacts Only
+            # anyway; it can still wake a receiver set to Everyone, so this
+            # degrades rather than refusing to advertise.
+            stamp(f'no validation record at {a.hashes_from_record}; advertising zero hashes')
+    a.hashes = a.hashes or '00' * 8
     if a.tag is None:
-        import os
         a.tag = os.urandom(3).hex()
 
     value = payload(a.arm, int(a.type, 0), a.hashes, a.tag)
+    stamp(f'contact hashes: {"record" if identifiers else "zeros"}'
+          + (f', {identifiers} identifiers validated, 4 slots filled' if identifiers else
+             ' -- a Contacts Only receiver cannot match these'))
     dbus.mainloop.glib.DBusGMainLoop(set_as_default=True)
     bus = dbus.SystemBus()
     path = f'/org/bluez/{a.adapter}'
@@ -141,7 +254,7 @@ def main():
         state['registered'] = True
         stamp(f'START arm={a.arm} tag={a.tag} type={a.type} interval_ms={a.interval_ms} '
               f'{"connectable" if not a.broadcast else "non-connectable"} '
-              f'adapter_addr={addr} ({addr_type}) mfr=4c00 value={value.hex()}')
+              f'adapter_addr={addr} ({addr_type}) mfr=4c00 value={redact(value)}')
         GLib.timeout_add_seconds(a.seconds, lambda: (stop(), False)[1])
 
     def failed(e):
