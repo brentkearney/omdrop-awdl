@@ -136,9 +136,9 @@ A device answers only while it is ready to receive. Measured 2026-09-20: of eigh
 
 `(no response)` says exactly that much. Nothing answered on the AirDrop port, and the cause is not distinguishable from here — a device that is not receiving produces it, and so does one restarting its Bonjour server mid-handshake. To see a name, put the other device into receive mode: on macOS open Finder → AirDrop and leave it open; on iOS open the share sheet, which brings its listener up in bursts.
 
-**Most devices report `(no response)` because their listener is genuinely down.** An idle Mac runs its AirDrop server in short bursts: measured from a receiver's own log 2026-09-20, four windows of 19–38 s separated by gaps of 10–16 minutes, a duty cycle of 3.5%. A lookup at an arbitrary moment finds such a device listening about 1 time in 29. Opening Finder → AirDrop on it keeps the server up continuously, and then it answers.
+A device reports `(no response)` when nothing answered on its AirDrop port. One measured reason is that the listener is not always up: from a receiver's own log 2026-09-20, an idle Mac started its AirDrop server four times for 19–38 s with gaps of 10–16 minutes. Opening Finder → AirDrop on the device keeps the server up, and it answers.
 
-A lookup against a device that *is* listening still fails occasionally. That cause is unresolved: the receiver's log shows one server restart across twelve minutes and 42 completed lookups, so it is not simply that each connection disturbs the peer. If a device you expect is unnamed, run it again.
+Lookups also fail sometimes against a device whose listener is up. That cause is unresolved. If a device you expect is unnamed, run it again.
 
 `(anonymous)` is different — the peer answered but withheld its name, which it does when it does not recognize the sender.
 
