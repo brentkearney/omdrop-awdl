@@ -61,34 +61,56 @@ def _wake_start():
         proc = subprocess.Popen(
             [sys.executable, ADVERTISER, "--arm", "A", "--hashes-from-record",
              "--seconds", str(WAKE_SECONDS), "--interval-ms", "100"],
-            stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True)
+            stdout=subprocess.PIPE, stderr=subprocess.STDOUT, bufsize=0)
     except OSError as e:
         return None, f"wake not started: {e.strerror}"
 
-    # The advertiser redacts hash bytes itself, so its lines are safe to show.
-    # An interrupt anywhere below would otherwise strand a transmitting child
-    # the caller has never seen: the pid lives in this frame until it returns.
+    # Raw bytes, and every complete line in hand is examined before waiting for
+    # the fd again. select() answers about the PIPE, not about Python's buffer,
+    # and the advertiser prints its hash-source line and START in one flush --
+    # so a readline() that swallowed both would leave select() with nothing to
+    # report and time out five seconds after the advert was already up.
+    # Reading in chunks also means a partial line never blocks.
+    #
+    # An interrupt anywhere below would strand a transmitting child the caller
+    # has never seen: the pid lives in this frame until it returns.
     try:
         deadline = time.monotonic() + WAKE_READY
-        last = ""
-        while time.monotonic() < deadline:
-            if proc.poll() is not None:
-                # Whatever it said last is the reason it is gone; a line
-                # already read is not in the pipe any more, so keep it as we go.
-                rest = (proc.stdout.read() or "").strip().splitlines()
-                proc.wait()
-                return None, f"wake exited: {rest[-1] if rest else last or 'no output'}"
-            if select.select([proc.stdout], [], [], max(0.0, deadline - time.monotonic()))[0]:
-                line = proc.stdout.readline()
+        fd = proc.stdout.fileno()
+        os.set_blocking(fd, False)
+        buf, last, eof = b"", "", False
+        while True:
+            while b"\n" in buf:
+                raw, buf = buf.split(b"\n", 1)
+                line = raw.decode("utf-8", "replace").strip()
                 if not line:
                     continue
-                last = line.strip()
+                last = line
                 if " START " in line:
                     time.sleep(WAKE_SETTLE)
                     return proc, None
                 if "FAILED" in line:
                     return proc, f"wake not advertising: {last}"
-        return proc, f"wake did not register within {WAKE_READY:.0f}s"
+            if eof or proc.poll() is not None:
+                # Drain first: the reason it died is the last thing it said.
+                if not eof:
+                    try:
+                        buf += proc.stdout.read() or b""
+                    except (BlockingIOError, ValueError):
+                        pass
+                    eof = True
+                    continue
+                proc.wait()
+                return None, f"wake exited: {last or 'no output'}"
+            left = deadline - time.monotonic()
+            if left <= 0:
+                return proc, f"wake did not register within {WAKE_READY:.0f}s"
+            if select.select([fd], [], [], left)[0]:
+                chunk = os.read(fd, 4096)
+                if not chunk:
+                    eof = True
+                else:
+                    buf += chunk
     except BaseException:
         _wake_stop(proc)
         raise
