@@ -213,15 +213,10 @@ off the commit that eventually goes upstream. Sending commits instead keeps your
 authorship. It also covers sign-off, the trailers other people add, and the
 difference between this fork and mainline `brcmfmac`.
 
-See [issue #8](https://github.com/brentkearney/omdrop-awdl/issues/8) for the
-work left to do.
-
-The two largest gaps: receive is stable only with the Wi-Fi link on 2.4 GHz, and
-there is no send mode yet. **Testers on Apple Broadcom parts other than the
-BCM4387 are the most useful thing right now** — the patches gate on nothing, so
-the module builds and loads anywhere `brcmfmac` does, and whether the AWDL
-interface then comes up is exactly the open question. Report
-`lspci -nn | grep -i network` with any result.
+Testers on Apple Broadcom parts other than the BCM4387 are the most useful thing 
+right now — the patches gate on nothing, so the module builds and loads anywhere 
+`brcmfmac` does, and whether the AWDL interface then comes up is exactly the open 
+question. Report `lspci -nn | grep -i network` with any result.
 
 ## Provenance
 
