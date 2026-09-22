@@ -1,20 +1,21 @@
 # omdrop-awdl
 
-AWDL support for the Broadcom BCM4387: eleven patches to `brcmfmac`, a DKMS package that builds them, and the root-side helpers that drive the result.
+AWDL support for the Broadcom BCM4387: twelve patches to `brcmfmac`, a DKMS package that builds them, and the root-side helpers that drive the result.
 
 AWDL — Apple Wireless Direct Link — is the link layer AirDrop and AirPlay run over. These patches create an `awdl0` interface from the firmware's own AWDL implementation, rather than reimplementing the protocol in userspace.
 
-This is the driver half of an upcoming ["Omdrop" plugin](https://github.com/brentkearney/omdrop-plugin) for [Omarchy M](https://github.com/omacom/omarchy-mac), the Omarchy Linux distribution for Macs.
+This is the driver half of the ["Omdrop" plugin](https://github.com/brentkearney/omdrop-plugin) for [Omarchy M](https://github.com/omacom/omarchy-mac), the Omarchy Linux distribution for Macs. The functional patches are also proposed for the distribution kernel in [omacom/linux#11](https://github.com/omacom/linux/pull/11).
 
 - [Hardware](#hardware)
 - [Install](#install)
 - [What the package installs](#what-the-package-installs)
 - [Sending and Receiving](#sending-and-receiving)
 - [Configuration](#configuration)
+- [Power](#power)
 - [DKMS Failsafe](#dkms-failsafe)
 - [The patches](#the-patches)
 - [Maintenance](#maintenance)
-  - [Contributions & WIP](#contributions--wip)
+  - [Contributions](#contributions)
 - [Provenance](#provenance)
 - [Trademark](#trademark)
 - [Licence](#licence)
@@ -128,21 +129,19 @@ pkexec /usr/lib/omdrop/omdrop-discoverable trace off
 
 `trace` toggles the `awdl_trace` module parameter, which gates the per-frame `awdl txstatus` and `awdl af rx` lines. Off by default, because a window submits 40 frames per interval. With it on, `tx_status=0x0000` is a frame the receiver acknowledged and `0x0003` is one the firmware discarded before it reached the air — the difference between a peer that cannot hear us and a peer we never registered.
 
-### A peer can only be named while it is receiving
+### Naming a peer
 
-`omdrop peers -n` asks each peer for its name over `/Discover`. A name is not advertised anywhere — an AirDrop mDNS instance is a random 12-hex id — so the only source is the peer's own answer, and that needs a TCP connection to its AirDrop port.
+`send-to-peer --list --names` (`omdrop peers -n` from the plugin) asks each peer for its name over `/Discover`. A name is advertised nowhere — an AirDrop mDNS instance is a random 12-hex id — so the only source is the peer's own answer, and that needs a TCP connection to its AirDrop port.
 
-A device answers only while it is ready to receive. Measured 2026-09-20: of eight peers within range, the one with Finder → AirDrop open answered on 8770 and named itself; the rest did not answer at all.
+A device answers only while its AirDrop service is up, and a device set to **Contacts Only** keeps that service shut until it recognizes a nearby sender. So the lookup raises a bounded BLE Continuity advert carrying this machine's own contact hashes, the same signal an Apple device emits when its share sheet opens, and takes it down again when the listing ends. Measured on a Contacts Only Mac 2026-09-21: it recognized the advert, started its AirDrop server within a millisecond, and answered — 3 of 3 lookups named both peers in range, 15–18 s each. With zero hashes, which is what this sent before, the same Mac logged the advert as unrecognized and started nothing.
 
-`(no response)` says exactly that much. Nothing answered on the AirDrop port, and the cause is not distinguishable from here — a device that is not receiving produces it, and so does one restarting its Bonjour server mid-handshake. To see a name, put the other device into receive mode: on macOS open Finder → AirDrop and leave it open; on iOS open the share sheet, which brings its listener up in bursts.
+`--no-wake` runs the lookup without the advert. Names then come only from devices already listening, which is the older behaviour and useful when you do not want to announce this machine over Bluetooth.
 
-A device reports `(no response)` when nothing answered on its AirDrop port. One measured reason is that the listener is not always up: from a receiver's own log 2026-09-20, an idle Mac started its AirDrop server four times for 19–38 s with gaps of 10–16 minutes. Opening Finder → AirDrop on the device keeps the server up, and it answers.
+The advert needs an Apple-issued identity installed, since the hashes are derived from its validation record, plus BlueZ and `python-dbus`/`python-gobject`. Without them the lookup says so on stderr and names whatever is already listening.
 
-Lookups also fail sometimes against a device whose listener is up. That cause is unresolved. If a device you expect is unnamed, run it again.
+`(no response)` means nothing answered on the AirDrop port. `(anonymous)` is different — the peer answered but withheld its name, which it does when it does not recognize the sender.
 
-`(anonymous)` is different — the peer answered but withheld its name, which it does when it does not recognize the sender.
-
-A lookup is retried once, because the first connection to an Apple peer is often destroyed in flight. Even so, expect the occasional `(not receiving)` from a device that is receiving: measured against a receiving Mac 2026-09-20, 5 of 6 listings named it and the sixth timed out on both attempts. The listener flaps; run it again.
+**A lookup can still fail against a device that is awake.** The knock retries until the advert's own 30 s ceiling rather than giving up after a fixed wait, because reaching a woken port is not instant: in one measured failure the sender put nine SYNs on the air across 8.2 s and the receiver's own capture recorded none of them arriving. Where that loss happens — radio, firmware queue or peer scheduling — is not established. If a device you expect is unnamed, run it again.
 
 ### The firmware peer table holds eight entries
 
@@ -191,32 +190,25 @@ DKMS (Dynamic Kernel Module Support) installs the patched module to `updates/dkm
 | 0007 | Translate AWDL data frames at the `awdl0` boundary |
 | 0008 | Tolerate txstatus for a freed flowring (fixes a NULL deref) |
 | 0009–0011 | Action-frame instrumentation on the AWDL interface |
+| 0012 | Gates that instrumentation behind the `awdl_trace` module parameter |
 
-**The instrumentation patches matter.** 0009–0011 log and dump AWDL action frames — the PSF and MIF frames discovery actually runs on. Almost nothing about this protocol is documented, and these are how you find out what the firmware is really doing. If you are extending this work, start there.
+**The instrumentation patches matter.** 0009–0011 log and dump AWDL action frames — the PSF and MIF frames discovery actually runs on. Almost nothing about this protocol is documented, and these are how you find out what the firmware is really doing. If you are extending this work, start there. They are left out of the kernel pull request, which carries 0001–0005, 0007 and 0008: the functional path.
 
 Patch 0008 is an ordinary kernel bug fix with no AWDL dependency, and stands on its own.
 
 ## Maintenance
 
-The patches are against **`asahi-7.1.13-2`** (commit `13aba96f`), matching `linux-asahi 7.1.13.asahi2-1`, and that is the tree vendored in `kernel/`. The pin is deliberate: a newer tree may need them rebased, and building against whatever happens to be current would turn a rebase conflict into a runtime surprise. [kernel/PROVENANCE.md](kernel/PROVENANCE.md) has the re-vendoring sequence.
+The patches are against **`asahi-7.1.13-3`** (commit `94fb2334`), and that is the tree vendored in `kernel/`. The pin is deliberate: a newer tree may need them rebased, and building against whatever happens to be current would turn a rebase conflict into a runtime surprise. [kernel/PROVENANCE.md](kernel/PROVENANCE.md) has the re-vendoring sequence, and `tests/check-patch-drift` reports whether they still apply to a newer tag.
 
-They touch twelve files, all under `drivers/net/wireless/broadcom/brcm80211/brcmfmac/`. Nothing outside that directory.
+They touch fourteen files, all under `drivers/net/wireless/broadcom/brcm80211/brcmfmac/`. Nothing outside that directory.
 
 The debug build is not a leftover. The data-path gate counts per-frame `awdl txstatus` lines to tell a parked radio from a working one, so a non-debug build removes the only oracle there is.
 
-### Contributions & WIP
+### Contributions
 
-Contributions are welcome — Issues and PRs both. [CONTRIBUTING.md](CONTRIBUTING.md)
-is worth reading first for kernel changes: the patches live here as
-`git format-patch` files, so editing one of those files in a PR leaves your name
-off the commit that eventually goes upstream. Sending commits instead keeps your
-authorship. It also covers sign-off, the trailers other people add, and the
-difference between this fork and mainline `brcmfmac`.
+Contributions are welcome — Issues and PRs both. [CONTRIBUTING.md](CONTRIBUTING.md) is worth reading first for kernel changes: the patches live here as `git format-patch` files, so editing one of those files in a PR leaves your name off the commit that eventually goes upstream. Sending commits instead keeps your authorship. It also covers sign-off, the trailers other people add, and the difference between this fork and mainline `brcmfmac`.
 
-Testers on Apple Broadcom parts other than the BCM4387 are the most useful thing 
-right now — the patches gate on nothing, so the module builds and loads anywhere 
-`brcmfmac` does, and whether the AWDL interface then comes up is exactly the open 
-question. Report `lspci -nn | grep -i network` with any result.
+Testers on Apple Broadcom parts other than the BCM4387 are the most useful thing right now — the patches gate on nothing, so the module builds and loads anywhere `brcmfmac` does, and whether the AWDL interface then comes up is exactly the open question. Report `lspci -nn | grep -i network` with any result, working or not.
 
 ## Provenance
 
