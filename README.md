@@ -1,35 +1,71 @@
 # omdrop-awdl
 
-AWDL support for the Broadcom BCM4387: twelve patches to `brcmfmac`, a DKMS package that builds them, and the root-side helpers that drive the result.
+AWDL for Apple Silicon Macs on Linux: twelve patches to `brcmfmac`, a DKMS package that builds them, and the root-side helpers that drive the result.
 
-AWDL — Apple Wireless Direct Link — is the link layer AirDrop and AirPlay run over. These patches create an `awdl0` interface from the firmware's own AWDL implementation, rather than reimplementing the protocol in userspace.
+AWDL (Apple Wireless Direct Link) is the link layer AirDrop and AirPlay run over. These patches expose the Wi-Fi firmware's own AWDL implementation as an `awdl0` interface, instead of reimplementing the protocol in userspace.
 
-This is the driver half of the ["Omdrop" plugin](https://github.com/brentkearney/omdrop-plugin) for [Omarchy M](https://github.com/omacom/omarchy-mac), the Omarchy Linux distribution for Macs. The functional patches are also proposed for the distribution kernel in [omacom/linux#11](https://github.com/omacom/linux/pull/11).
+This is the driver half of [Omdrop](https://github.com/brentkearney/omdrop-plugin), AirDrop for [Omarchy M](https://github.com/omacom/omarchy-mac). The functional patches are also proposed for the distribution kernel in [omacom/linux#11](https://github.com/omacom/linux/pull/11).
 
-- [Hardware](#hardware)
+- [Hardware compatibility](#hardware-compatibility)
 - [Install](#install)
 - [What the package installs](#what-the-package-installs)
-- [Sending and Receiving](#sending-and-receiving)
+- [Sending and receiving](#sending-and-receiving)
 - [Configuration](#configuration)
 - [Power](#power)
-- [DKMS Failsafe](#dkms-failsafe)
 - [The patches](#the-patches)
 - [Maintenance](#maintenance)
-  - [Contributions](#contributions)
 - [Provenance](#provenance)
-- [Trademark](#trademark)
-- [Licence](#licence)
 
-## Hardware
+## Hardware compatibility
 
-Developed on **BCM4387** (`14e4:4433`) in a MacBook Pro 16-inch, M1 Pro, running Asahi Linux. Other Apple Broadcom parts are plausible and untested. Apple models that ship with the BCM4387:
- - MacBook Pro 14" and 16", 2021 — M1 Pro / M1 Max (j314/j316, t600x)
- - Mac Studio, 2022 — M1 Max / M1 Ultra (j375)
- - MacBook Air 13", 2022 — M2 (j413)
- - MacBook Pro 13", 2022 — M2 (j493)
- - Mac mini, 2023 — M2 (j473) [INFERENCE]
+The patches configure AWDL the firmware already implements, so they only work on Apple's Broadcom Wi-Fi. They don't work on Intel, MediaTek, or Qualcomm cards. For AirDrop on other hardware, see [OpenDrop](https://github.com/seemoo-lab/opendrop) and [owl](https://github.com/seemoo-lab/owl), which implement AWDL in userspace over monitor mode.
 
-This will not work on Intel, MediaTek or Qualcomm Wi-Fi. The approach depends on the firmware already implementing AWDL; the patches configure it rather than providing it. If you want AirDrop on non-Apple hardware, look at [owl](https://github.com/seemoo-lab/owl) and [OpenDrop](https://github.com/seemoo-lab/opendrop), which reimplement AWDL in userspace over monitor mode.
+### Known to work
+
+| Mac | Wi-Fi chip | WLAN PCI ID |
+| --- | --- | --- |
+| MacBook Pro 16-inch (2021), M1 Pro | BCM4387 | `14e4:4433` |
+
+### Probably works
+
+Same BCM4387 chip, not yet tested:
+
+| Mac | Apple chip |
+| --- | --- |
+| MacBook Pro 14-inch (2021) | M1 Pro, M1 Max |
+| MacBook Pro 16-inch (2021) | M1 Max |
+| Mac Studio (2022) | M1 Max, M1 Ultra |
+| MacBook Air 13-inch (2022) | M2 |
+| MacBook Air 15-inch (2023) | M2 |
+
+### Unknown
+
+Different Broadcom chips. The patches work here only if the firmware carries the same AWDL implementation.
+
+| Mac | Apple chip | Wi-Fi chip |
+| --- | --- | --- |
+| MacBook Air (2020) | M1 | BCM4378 |
+| MacBook Pro 13-inch (2020) | M1 | BCM4378 |
+| Mac mini (2020) | M1 | BCM4378 |
+| iMac 24-inch (2021) | M1 | BCM4378 |
+| MacBook Pro 13-inch (2022) | M2 | BCM4378 |
+| Mac mini (2023) | M2, M2 Pro | BCM4388 |
+| MacBook Pro 14-inch and 16-inch (2023) | M2 Pro, M2 Max | BCM4388 |
+| Mac Studio (2023) | M2 Max, M2 Ultra | BCM4388 |
+| Mac Pro (2023) | M2 Ultra | BCM4388, reported; Asahi's device tree is inconsistent for this model |
+
+The Apple chip doesn't determine the Wi-Fi chip, so check yours with `lspci -nn | grep -i network`: BCM4378 is `14e4:4425`, BCM4387 is `14e4:4433`, and BCM4388 is `14e4:4434`. Sources: the [Asahi device list](https://asahilinux.org/docs/hw/devices/device-list/), [Asahi's WLAN PCI IDs](https://github.com/AsahiLinux/linux/blob/asahi/drivers/net/wireless/broadcom/brcm80211/include/brcm_hw_ids.h), and an [Apple device-tree radio inventory](https://gist.github.com/JJTech0130/bf7dbc5b4ea1442a07bbd58bb1ae89c4).
+
+### Testing another Mac
+
+The module doesn't check the chip ID: it builds and loads on any `brcmfmac` card, and firmware without AWDL fails when `awdl0` is created. Recovering a wedged firmware means reloading `brcmfmac`, which drops Wi-Fi, so test where you can afford to lose the network briefly.
+
+Reports from BCM4378 and BCM4388 owners are the most useful thing right now. [Open an issue](https://github.com/brentkearney/omdrop-awdl/issues) with:
+
+- Mac model, year, and Apple chip, plus the WLAN ID from `lspci -nn`.
+- Kernel version, package version, and Wi-Fi firmware version if you have it.
+- How far it got: `awdl0` created, peers found, names resolved, a file sent, a file received.
+- Relevant errors or logs, with personal data removed.
 
 ## Install
 
@@ -39,188 +75,146 @@ cd omdrop-awdl
 makepkg -si
 ```
 
-The build is offline and takes seconds: the three kernel directories DKMS compiles are vendored in `kernel/` (1.4 MB, pristine from the pinned Asahi tag — see [kernel/PROVENANCE.md](kernel/PROVENANCE.md)), and the patches are applied to a copy of them at build time.
+The build is offline and takes seconds. The kernel sources DKMS compiles are vendored in `kernel/`, taken unmodified from the pinned Asahi tag (see [kernel/PROVENANCE.md](kernel/PROVENANCE.md)), and the patches are applied to a copy at build time. The package isn't on the AUR, which only indexes x86_64. The recipe proposed for Omarchy's package repository is generated into [omarchy-pkgs/](omarchy-pkgs/) from the same `PKGBUILD`.
 
-Not on the AUR: it is an x86_64 index, and no Apple Silicon kernel package lives there. The recipe Omarchy's own package repository builds is generated into [omarchy-pkgs/](omarchy-pkgs/) from the `PKGBUILD` above, so there is one source of truth for how this package is built.
-
-Then reboot, or reload the driver when the link can go down for a minute:
+Reboot, or reload the driver if the link can drop for a minute:
 
 ```bash
 sudo modprobe -r brcmfmac_wcc brcmfmac brcmutil
 sudo modprobe brcmfmac
 ```
 
-Enable the boot-time interface setup, which creates and configures `awdl0` without enabling AWDL or advertising anything:
+Then enable boot-time setup, which creates `awdl0` without enabling AWDL or advertising anything:
 
 ```bash
 sudo systemctl enable --now awdl0.service
 ```
 
-Discoverability stays off until something asks for it. The omdrop plugin's panel button is the usual caller; from a terminal:
+If a kernel update breaks the DKMS build, the stock `brcmfmac` loads instead: DKMS installs to `updates/dkms/` without removing the in-tree driver. You lose AWDL, not the network.
+
+## What the package installs
+
+| Path | Purpose |
+|---|---|
+| `/usr/src/brcmfmac-awdl-<ver>/` | Patched `brcmfmac` sources, built by DKMS for every kernel |
+| `/usr/lib/omdrop/omdrop-discoverable` | Opens and closes a bounded discoverability window |
+| `/usr/lib/omdrop/awdl-up` | Creates and configures `awdl0`; run at boot by `awdl0.service` |
+| `/usr/lib/omdrop/send-to-peer` | Lists peers and sends a file to one |
+| `/usr/lib/omdrop/airdrop-send.py` | The sender: `/Discover`, `/Ask`, and `/Upload` over TLS on `awdl0` |
+| `/usr/lib/omdrop/awdl-resolve` | Reads a peer's advertised AirDrop service from its action frames |
+| `/usr/lib/omdrop/*.py` | Helpers for the tools above |
+| `/usr/share/polkit-1/actions/org.omarchy.omdrop.policy` | Lets a local desktop session run `omdrop-discoverable` without a password |
+| `/usr/lib/systemd/system/awdl0.service` | Boot-time `awdl0` setup; not enabled by the install |
+| `/usr/lib/modprobe.d/brcmfmac-awdl.conf` | `debug=0x1000`, the log lines the data-path check counts |
+| `/usr/lib/NetworkManager/conf.d/99-awdl-unmanaged.conf` | Keeps NetworkManager off `awdl0` |
+| `/usr/share/doc/brcmfmac-awdl-dkms/` | This README, and an optional `10-wld0.link` the package doesn't activate |
+
+Boot creates `awdl0` but doesn't enable AWDL. AWDL that is always on makes the radio hop channels on its slot schedule, which costs battery and Wi-Fi throughput, and leaves the machine permanently discoverable. The trade-off is that the first window takes about ten seconds to come up.
+
+## Sending and receiving
+
+Both directions work with Macs and iPhones, in Everyone and Contacts Only mode. Only the radio window needs root, which polkit grants without a password.
+
+A window turns discoverability on for a set time:
 
 ```bash
-pkexec /usr/lib/omdrop/omdrop-discoverable start 600   # visible for ten minutes
+pkexec /usr/lib/omdrop/omdrop-discoverable start 600   # ten minutes
 pkexec /usr/lib/omdrop/omdrop-discoverable stop
 /usr/lib/omdrop/omdrop-discoverable status --json      # no root needed
 ```
 
-## What the package installs
-
-| Path | What it is |
-|---|---|
-| `/usr/src/brcmfmac-awdl-<ver>/` | Patched `brcmfmac` sources; DKMS builds them for every kernel |
-| `/usr/lib/omdrop/omdrop-discoverable` | Opens and closes a bounded discoverability window: data-path gate, PSF template, announcer, mDNS responder, peer registration |
-| `/usr/lib/omdrop/awdl-up` | Creates and configures `awdl0`; run at boot by `awdl0.service` |
-| `/usr/lib/omdrop/*.py` | The iovar, frame-building and decoding helpers the two above call |
-| `/usr/lib/omdrop/send-to-peer` | Sends a file to a peer: reads the firmware peer table, derives the endpoint, dials it |
-| `/usr/lib/omdrop/awdl-resolve` | Reads a peer's advertised AirDrop service out of its action frames, and its address out of mDNS |
-| `/usr/lib/omdrop/airdrop-send.py` | The sender itself: Discover, Ask, Upload over TLS on `awdl0` |
-| `/usr/share/polkit-1/actions/org.omarchy.omdrop.policy` | Action `org.omarchy.omdrop.discover`, bound to `omdrop-discoverable`, so a desktop session can become discoverable without a password |
-| `/usr/lib/systemd/system/awdl0.service` | Boot-time `awdl0` setup. Not enabled by the install |
-| `/usr/lib/modprobe.d/brcmfmac-awdl.conf` | `debug=0x1000`, which the data-path gate counts `awdl txstatus` lines from |
-| `/usr/lib/NetworkManager/conf.d/99-awdl-unmanaged.conf` | Keeps NetworkManager off `awdl0` |
-| `/usr/share/doc/brcmfmac-awdl-dkms/` | This README, and an optional `10-wld0.link` the package does not activate |
-
-Boot creates `awdl0` but does **not** enable AWDL. An always-on AWDL makes the radio follow its slot schedule across channels, leaving the infra channel periodically — battery and STA throughput spent continuously for a feature used in bursts — and permanent discoverability is a privacy posture nobody asked for. The cost of the choice is that the first window pays the data-path gate, about ten seconds, instead of the boot paying it.
-
-## Sending and Receiving
-
-Both directions work, on a Mac and on an iPhone. Nothing here needs root except the radio window, which polkit grants without a password.
-
 ### Receiving
 
-Open a window, then run a receiver bound to `awdl0` port 8771:
+This package is the radio side only. The receiving HTTPS service is in the [Omdrop plugin](https://github.com/brentkearney/omdrop-plugin), where `omdrop on 10m` opens a window and starts the receiver together. Any AirDrop receiver listening on `[<awdl0 link-local>]:8771` works.
 
-```bash
-pkexec /usr/lib/omdrop/omdrop-discoverable start 600     # ten minutes
-pkexec /usr/lib/omdrop/omdrop-discoverable status --json
-pkexec /usr/lib/omdrop/omdrop-discoverable stop
-```
-
-This package provides the radio side only. The receiving HTTPS service lives in the [omdrop plugin](https://github.com/brentkearney/omdrop-plugin), which drives all of the above from a panel and saves arriving files; `omdrop on 10m` there does the window and the receiver together. Any AirDrop receiver listening on `[<awdl0 link-local>]:8771` will do.
-
-The sending Apple device can be set to **Everyone** or to **Contacts Only**; both work, in both directions. Contacts Only requires an Apple-issued identity installed on this machine, which is what the Apple device checks you against. Without one, use **Everyone**, or **Everyone for 10 Minutes** on iOS — a self-signed certificate is rejected at TLS.
+To send to this machine from a Contacts Only device, this machine needs an Apple-issued identity, which the sender checks it against. Without one, set the sender to **Everyone**; a self-signed certificate is rejected at TLS.
 
 ### Sending
 
+With a window open:
+
 ```bash
-/usr/lib/omdrop/send-to-peer --list                  # who can we hear, and where
-/usr/lib/omdrop/send-to-peer FILE                    # the only peer heard
-/usr/lib/omdrop/send-to-peer --mac e2:9d:.. FILE     # pick one
-/usr/lib/omdrop/send-to-peer --wait 120 FILE         # wait for an iPhone to listen
+/usr/lib/omdrop/send-to-peer --list               # peers in range
+/usr/lib/omdrop/send-to-peer FILE                 # the only peer heard
+/usr/lib/omdrop/send-to-peer --mac e2:9d:.. FILE  # choose a peer
+/usr/lib/omdrop/send-to-peer --wait 120 FILE      # keep trying while an iPhone sleeps
 ```
 
-A window has to be open first: the peer table is populated by the peer watcher the window starts, and the recipient's prompt names whatever `--name` says (default `Omarchy`).
+The recipient's prompt shows the `--name` value, `Omarchy` by default.
 
-**Discovery is not used, deliberately.** A peer's endpoint is derived: the address is the EUI-64 link-local of its AWDL MAC, and the port comes from the service it advertises. A Mac in Everyone mode publishes `_airdrop._tcp` over mDNS *and* accepts on 8770 continuously, so it answers immediately. Waiting for an mDNS advert is what earlier attempts got wrong — a Mac with no Finder AirDrop window open publishes nothing at all, while still listening.
+The sender doesn't wait for mDNS. A peer's address is the EUI-64 link-local of its AWDL MAC, and its port comes from the service it advertises. A Mac with no Finder AirDrop window open publishes nothing over mDNS but still listens, so waiting for mDNS would miss it. An iPhone opens its listener only for a few seconds around other AirDrop activity, so `--wait` polls and sends the moment it opens. Opening a share sheet on the phone brings its listener up.
 
-**An iPhone is different in one way that matters.** It does not keep an AirDrop listener up while merely discoverable: measured 2026-09-18, port 8770 refused instantly, was open for a few seconds around other sharingd activity, and was gone a minute later. `--wait` polls for that opening and sends the moment it appears; without it a single attempt is a coin flip. Opening a share sheet on the phone, or receiving anything, brings its listener up.
+### Naming a peer
 
-Timings from the runs that proved this, for reference: a Mac answered `/Discover` in 1.3–2.1 s and stored a file 1 s after the user tapped Accept; an iPhone the same, with the prompt visible for 2–9 s.
+`send-to-peer --list --names` (or `omdrop peers -n`) asks each peer for its name with a `/Discover` request, because AirDrop advertises no names. A Contacts Only device keeps its AirDrop service shut until it recognizes a nearby sender. So during the lookup, the sender broadcasts a Bluetooth advert carrying this machine's contact hashes, as an Apple device does when its share sheet opens, and stops it when the lookup ends. `--no-wake` skips the advert, and then only devices already listening answer.
+
+The advert needs an Apple-issued identity, BlueZ, and `python-dbus` and `python-gobject`. Without them, the lookup says so on stderr and names only devices already listening.
+
+In the output, `(no response)` means nothing answered on the AirDrop port. `(anonymous)` means the peer answered but withheld its name, as it does when it doesn't recognize the sender. A lookup can miss a device that is awake, so if a device you expect is unnamed, run it again.
+
+### The firmware peer table holds eight entries
+
+The firmware tracks at most eight peers, and a peer without an entry silently loses every frame sent to it. Apple devices change their AWDL MAC every few minutes, and each change takes a new entry. The peer watcher frees slots when a window starts, on `SIGTERM`, and at capacity, where it evicts the peer heard least recently. The device you're talking to stays registered, but in a busy room a quiet device can drop out and reappear. `omdrop-discoverable status` reports `peer_op=degraded` when the table is full of peers that are all audible.
 
 ### Diagnosing a transfer
 
 ```bash
-pkexec /usr/lib/omdrop/omdrop-discoverable peers          # firmware peer table, with RSSI
-pkexec /usr/lib/omdrop/omdrop-discoverable diag 10        # counters over ten seconds
-pkexec /usr/lib/omdrop/omdrop-discoverable trace on       # per-frame tx completions in dmesg
+pkexec /usr/lib/omdrop/omdrop-discoverable peers      # firmware peer table, with RSSI
+pkexec /usr/lib/omdrop/omdrop-discoverable diag 10    # counters over ten seconds
+pkexec /usr/lib/omdrop/omdrop-discoverable trace on   # per-frame tx completions in dmesg
 pkexec /usr/lib/omdrop/omdrop-discoverable trace off
 ```
 
-`trace` toggles the `awdl_trace` module parameter, which gates the per-frame `awdl txstatus` and `awdl af rx` lines. Off by default, because a window submits 40 frames per interval. With it on, `tx_status=0x0000` is a frame the receiver acknowledged and `0x0003` is one the firmware discarded before it reached the air — the difference between a peer that cannot hear us and a peer we never registered.
-
-### Naming a peer
-
-`send-to-peer --list --names` (`omdrop peers -n` from the plugin) asks each peer for its name over `/Discover`. A name is advertised nowhere — an AirDrop mDNS instance is a random 12-hex id — so the only source is the peer's own answer, and that needs a TCP connection to its AirDrop port.
-
-A device answers only while its AirDrop service is up, and a device set to **Contacts Only** keeps that service shut until it recognizes a nearby sender. So the lookup raises a bounded BLE Continuity advert carrying this machine's own contact hashes, the same signal an Apple device emits when its share sheet opens, and takes it down again when the listing ends. Measured on a Contacts Only Mac 2026-09-21: it recognized the advert, started its AirDrop server within a millisecond, and answered — 3 of 3 lookups named both peers in range, 15–18 s each. With zero hashes, which is what this sent before, the same Mac logged the advert as unrecognized and started nothing.
-
-`--no-wake` runs the lookup without the advert. Names then come only from devices already listening, which is the older behaviour and useful when you do not want to announce this machine over Bluetooth.
-
-The advert needs an Apple-issued identity installed, since the hashes are derived from its validation record, plus BlueZ and `python-dbus`/`python-gobject`. Without them the lookup says so on stderr and names whatever is already listening.
-
-`(no response)` means nothing answered on the AirDrop port. `(anonymous)` is different — the peer answered but withheld its name, which it does when it does not recognize the sender.
-
-**A lookup can still fail against a device that is awake.** The knock retries until the advert's own 30 s ceiling rather than giving up after a fixed wait, because reaching a woken port is not instant: in one measured failure the sender put nine SYNs on the air across 8.2 s and the receiver's own capture recorded none of them arriving. Where that loss happens — radio, firmware queue or peer scheduling — is not established. If a device you expect is unnamed, run it again.
-
-### The firmware peer table holds eight entries
-
-`awdl_maxpeers` reads **8**, and the firmware rejects a ninth `awdl_peer_op ADD` with `ESPIPE`. A peer with no entry silently loses every unicast frame we send it — the transmit completes `FW_TOSSED` before it reaches the air — so it cannot discover this host and cannot receive from it, while every local surface still looks healthy.
-
-Apple devices rotate their AWDL MAC every few minutes, and each rotation is a new entry. The peer watcher therefore releases slots rather than only claiming them:
-
-- at startup, so a window never inherits a full table from a window that crashed, was killed, or was cut short by suspend;
-- on `SIGTERM`, so an idle machine is not holding slots it has no use for;
-- at capacity, evicting the peer heard least recently. Hearing a peer again refreshes it, so an active device is never evicted in favour of a stale one.
-
-**Known limitation: eight is a low ceiling in a busy room.** Three Apple devices rotating their MACs work through eight slots in minutes. Eviction turns that from a hard failure into churn — the device you are actively talking to stays resident, because hearing it refreshes its position — but a device that has been quiet for a while can be dropped and has to be re-registered from its next frame, which shows up as a tile that comes and goes. Nothing on screen explains it. `--only` restricts registration to named MACs and is the right lever when it matters.
-
-If `omdrop-discoverable status` reports `peer_op=degraded`, the table is full of peers that are all currently audible.
+With tracing on, `tx_status=0x0000` means the peer acknowledged a frame, and `0x0003` means the firmware dropped it before transmission, usually because the peer isn't registered.
 
 ## Configuration
 
-Nothing is required. Every tunable has a working default, and the helpers read the machine's own MAC, Wi-Fi interface and hostname at runtime rather than carrying a baked-in copy. To override one, drop a one-line file in `/etc/omdrop/`:
+Nothing is required. The helpers read the MAC, Wi-Fi interface, and hostname at runtime. To override a default, put a one-line file in `/etc/omdrop/`:
 
 | File | Default | Meaning |
 |---|---|---|
 | `infra-iface` | first Broadcom Wi-Fi interface | The interface `awdl0` is derived from |
-| `awdl-host` | `<short hostname>-awdl` | The name advertised over AWDL and answered over mDNS |
+| `awdl-host` | `<short hostname>-awdl` | Name advertised over AWDL and answered over mDNS |
 | `master-chan` | `6` | Master availability-window channel |
 | `peer-chan` | `44` | Peer availability-window channel |
-| `chan-shape` | `dense` | Slot density: `sparse`, `dense`, `full`, `dense44`, `mirror` |
-| `election-metric` | `100` | The election metric advertised and enforced |
+| `chan-shape` | `dense` | Slot density: `sparse`, `dense`, `full`, `dense44`, or `mirror` |
+| `election-metric` | `100` | Election metric advertised and enforced |
 | `rssi-sync-threshold` | firmware default | dBm floor for adopting a peer as root; `-60` keeps the election to the room |
 
 ## Power
 
-An open window costs **71 mW** (95% CI 59.8–82.5), measured on an M1 Pro over 5.6 hours of alternating six-minute blocks. That is 1.5% of a 4.71 W idle machine, or 0.083% of an 86 Wh charge per hour — a ten-minute window costs about 19 seconds of runtime, and staying discoverable around the clock costs 2% of a battery per day.
-
-So power is not a reason to keep windows short. How long to stay visible is a question about who can see the machine, not about battery. Method, data and caveats are in [issue #8](https://github.com/brentkearney/omdrop-awdl/issues/8#issuecomment-5731084807); reproduce with `power-cost` in the research tree.
-
-## DKMS Failsafe
-
-DKMS (Dynamic Kernel Module Support) installs the patched module to `updates/dkms/`, which `depmod` prefers over the in-tree driver **without deleting the original**. If a kernel update breaks the out-of-tree build, the stock `brcmfmac` loads and Wi-Fi still works. You lose AWDL, never the network.
+An open window costs 71 mW (95% CI 59.8–82.5), measured on an M1 Pro over 5.6 hours of alternating six-minute blocks. That's 1.5% of a 4.71 W idle machine: a ten-minute window costs about 19 seconds of battery, and staying discoverable all day costs 2% of a charge. How long to stay visible is a privacy question, not a battery one. The method and data are in [issue #8](https://github.com/brentkearney/omdrop-awdl/issues/8#issuecomment-5731084807).
 
 ## The patches
 
-| | |
+| Patches | Purpose |
 |---|---|
 | 0001–0005 | Create and manage the `awdl0` interface |
 | 0006 | Firmware RAM snapshot vendor op |
 | 0007 | Translate AWDL data frames at the `awdl0` boundary |
-| 0008 | Tolerate txstatus for a freed flowring (fixes a NULL deref) |
-| 0009–0011 | Action-frame instrumentation on the AWDL interface |
-| 0012 | Gates that instrumentation behind the `awdl_trace` module parameter |
+| 0008 | Tolerate txstatus for a freed flowring (fixes a NULL dereference) |
+| 0009–0011 | Log and dump AWDL action frames |
+| 0012 | Gate that instrumentation behind the `awdl_trace` module parameter |
 
-**The instrumentation patches matter.** 0009–0011 log and dump AWDL action frames — the PSF and MIF frames discovery actually runs on. Almost nothing about this protocol is documented, and these are how you find out what the firmware is really doing. If you are extending this work, start there. They are left out of the kernel pull request, which carries 0001–0005, 0007 and 0008: the functional path.
-
-Patch 0008 is an ordinary kernel bug fix with no AWDL dependency, and stands on its own.
+The kernel pull request carries the functional path: 0001–0005, 0007, and 0008. Patch 0008 is an ordinary bug fix that stands on its own. The instrumentation patches, 0009–0011, show the PSF and MIF frames discovery runs on. Little about this protocol is documented, so start there if you're extending this work.
 
 ## Maintenance
 
-The patches are against **`asahi-7.1.13-3`** (commit `94fb2334`), and that is the tree vendored in `kernel/`. The pin is deliberate: a newer tree may need them rebased, and building against whatever happens to be current would turn a rebase conflict into a runtime surprise. [kernel/PROVENANCE.md](kernel/PROVENANCE.md) has the re-vendoring sequence, and `tests/check-patch-drift` reports whether they still apply to a newer tag.
+The patches apply to `asahi-7.1.13-3` (commit `94fb2334`), the tree vendored in `kernel/`, and touch fourteen files, all in `drivers/net/wireless/broadcom/brcm80211/brcmfmac/`. The pin is deliberate, so a rebase conflict shows up at build time rather than at runtime. [kernel/PROVENANCE.md](kernel/PROVENANCE.md) has the re-vendoring steps, and `tests/check-patch-drift` checks whether the patches apply to a newer tag.
 
-They touch fourteen files, all under `drivers/net/wireless/broadcom/brcm80211/brcmfmac/`. Nothing outside that directory.
+The module is built with debug logging because the data-path check counts per-frame `awdl txstatus` lines to tell a stalled radio from a working one.
 
-The debug build is not a leftover. The data-path gate counts per-frame `awdl txstatus` lines to tell a parked radio from a working one, so a non-debug build removes the only oracle there is.
-
-### Contributions
-
-Contributions are welcome — Issues and PRs both. [CONTRIBUTING.md](CONTRIBUTING.md) is worth reading first for kernel changes: the patches live here as `git format-patch` files, so editing one of those files in a PR leaves your name off the commit that eventually goes upstream. Sending commits instead keeps your authorship. It also covers sign-off, the trailers other people add, and the difference between this fork and mainline `brcmfmac`.
-
-Testers on Apple Broadcom parts other than the BCM4387 are the most useful thing right now — the patches gate on nothing, so the module builds and loads anywhere `brcmfmac` does, and whether the AWDL interface then comes up is exactly the open question. Report `lspci -nn | grep -i network` with any result, working or not.
+Issues and pull requests are welcome. Before changing a kernel patch, read [CONTRIBUTING.md](CONTRIBUTING.md): the patches are stored as `git format-patch` files, so sending commits, not edited patch files, keeps your authorship on the commit that goes upstream.
 
 ## Provenance
 
-The patches and the helpers were developed with AI assistance.
+The patches and helpers were developed with AI assistance. They weren't submitted to Asahi Linux, whose [generative AI policy](https://asahilinux.org/llm-policy/) forbids AI-assisted contributions; this repository makes the work available to people who want it.
 
-They were not submitted to Asahi Linux, whose [generative AI policy](https://asahilinux.org/llm-policy/) forbids AI-assisted contributions. That is their call and this repository is not an argument with it — it exists so the work is available to people who want it, under the same licence as the code it derives from.
-
-The kernel patches derive from the Asahi Linux kernel tree and are licensed **GPL-2.0-only**, as the kernel is; authorship and `Signed-off-by` lines are preserved in each patch. The userspace helpers are original work under the same licence. They were written from published field descriptions — Broadcom's `wlioctl.h`, the Wireshark AWDL dissector, SEEMOO's papers — and from this project's own measurements, not from [owl](https://github.com/seemoo-lab/owl)'s GPLv3 source.
+The kernel patches derive from the Asahi Linux kernel and are licensed GPL-2.0-only, with authorship and `Signed-off-by` lines preserved. The userspace helpers are original work under the same licence, written from published field descriptions (Broadcom's `wlioctl.h`, the Wireshark AWDL dissector, and SEEMOO's papers) and this project's own measurements, not from [owl](https://github.com/seemoo-lab/owl)'s GPLv3 source.
 
 ## Trademark
 
-AirDrop is a trademark of Apple Inc. Omdrop is an independent project and is not affiliated with or endorsed by Apple.
+AirDrop is a trademark of Apple Inc. Omdrop is an independent project, not affiliated with or endorsed by Apple.
 
 ## Licence
 
