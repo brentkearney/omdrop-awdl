@@ -6,66 +6,16 @@ AWDL (Apple Wireless Direct Link) is the link layer AirDrop and AirPlay run over
 
 This is the driver half of [Omdrop](https://github.com/brentkearney/omdrop-plugin), AirDrop for [Omarchy M](https://github.com/omacom/omarchy-mac). The functional patches are also proposed for the distribution kernel in [omacom/linux#11](https://github.com/omacom/linux/pull/11).
 
-- [Hardware compatibility](#hardware-compatibility)
 - [Install](#install)
 - [What the package installs](#what-the-package-installs)
 - [Sending and receiving](#sending-and-receiving)
 - [Configuration](#configuration)
 - [Power](#power)
 - [The patches](#the-patches)
+- [Hardware compatibility](#hardware-compatibility)
 - [Maintenance](#maintenance)
 - [Provenance](#provenance)
 
-## Hardware compatibility
-
-The patches configure AWDL the firmware already implements, so they only work on Apple's Broadcom Wi-Fi. They don't work on Intel, MediaTek, or Qualcomm cards. For AirDrop on other hardware, see [OpenDrop](https://github.com/seemoo-lab/opendrop) and [owl](https://github.com/seemoo-lab/owl), which implement AWDL in userspace over monitor mode.
-
-### Known to work
-
-| Mac | Wi-Fi chip | WLAN PCI ID |
-| --- | --- | --- |
-| MacBook Pro 16-inch (2021), M1 Pro | BCM4387 | `14e4:4433` |
-
-### Probably works
-
-Same BCM4387 chip, not yet tested:
-
-| Mac | Apple chip |
-| --- | --- |
-| MacBook Pro 14-inch (2021) | M1 Pro, M1 Max |
-| MacBook Pro 16-inch (2021) | M1 Max |
-| Mac Studio (2022) | M1 Max, M1 Ultra |
-| MacBook Air 13-inch (2022) | M2 |
-| MacBook Air 15-inch (2023) | M2 |
-
-### Unknown
-
-Different Broadcom chips. The patches work here only if the firmware carries the same AWDL implementation.
-
-| Mac | Apple chip | Wi-Fi chip |
-| --- | --- | --- |
-| MacBook Air (2020) | M1 | BCM4378 |
-| MacBook Pro 13-inch (2020) | M1 | BCM4378 |
-| Mac mini (2020) | M1 | BCM4378 |
-| iMac 24-inch (2021) | M1 | BCM4378 |
-| MacBook Pro 13-inch (2022) | M2 | BCM4378 |
-| Mac mini (2023) | M2, M2 Pro | BCM4388 |
-| MacBook Pro 14-inch and 16-inch (2023) | M2 Pro, M2 Max | BCM4388 |
-| Mac Studio (2023) | M2 Max, M2 Ultra | BCM4388 |
-| Mac Pro (2023) | M2 Ultra | BCM4388, reported; Asahi's device tree is inconsistent for this model |
-
-The Apple chip doesn't determine the Wi-Fi chip, so check yours with `lspci -nn | grep -i network`: BCM4378 is `14e4:4425`, BCM4387 is `14e4:4433`, and BCM4388 is `14e4:4434`. Sources: the [Asahi device list](https://asahilinux.org/docs/hw/devices/device-list/), [Asahi's WLAN PCI IDs](https://github.com/AsahiLinux/linux/blob/asahi/drivers/net/wireless/broadcom/brcm80211/include/brcm_hw_ids.h), and an [Apple device-tree radio inventory](https://gist.github.com/JJTech0130/bf7dbc5b4ea1442a07bbd58bb1ae89c4).
-
-### Testing another Mac
-
-The module doesn't check the chip ID: it builds and loads on any `brcmfmac` card, and firmware without AWDL fails when `awdl0` is created. Recovering a wedged firmware means reloading `brcmfmac`, which drops Wi-Fi, so test where you can afford to lose the network briefly.
-
-Reports from BCM4378 and BCM4388 owners are the most useful thing right now. [Open an issue](https://github.com/brentkearney/omdrop-awdl/issues) with:
-
-- Mac model, year, and Apple chip, plus the WLAN ID from `lspci -nn`.
-- Kernel version, package version, and Wi-Fi firmware version if you have it.
-- How far it got: `awdl0` created, peers found, names resolved, a file sent, a file received.
-- Relevant errors or logs, with personal data removed.
 
 ## Install
 
@@ -198,6 +148,57 @@ An open window costs 71 mW (95% CI 59.8–82.5), measured on an M1 Pro over 5.6 
 
 The kernel pull request carries the functional path: 0001–0005, 0007, and 0008. Patch 0008 is an ordinary bug fix that stands on its own. The instrumentation patches, 0009–0011, show the PSF and MIF frames discovery runs on. Little about this protocol is documented, so start there if you're extending this work.
 
+## Hardware compatibility
+
+The patches configure AWDL the firmware already implements, so they only work on Apple's Broadcom Wi-Fi. They don't work on Intel, MediaTek, or Qualcomm cards. For AirDrop on other hardware, see [OpenDrop](https://github.com/seemoo-lab/opendrop) and [owl](https://github.com/seemoo-lab/owl), which implement AWDL in userspace over monitor mode.
+
+### Known to work
+
+| Mac | Wi-Fi chip | WLAN PCI ID |
+| --- | --- | --- |
+| MacBook Pro 16-inch (2021), M1 Pro | BCM4387 | `14e4:4433` |
+
+### Probably works
+
+Same BCM4387 chip, not yet tested:
+
+| Mac | Apple chip |
+| --- | --- |
+| MacBook Pro 14-inch (2021) | M1 Pro, M1 Max |
+| MacBook Pro 16-inch (2021) | M1 Max |
+| Mac Studio (2022) | M1 Max, M1 Ultra |
+| MacBook Air 13-inch (2022) | M2 |
+| MacBook Air 15-inch (2023) | M2 |
+
+### Unknown
+
+Different Broadcom chips. The patches work here only if the firmware carries the same AWDL implementation.
+
+| Mac | Apple chip | Wi-Fi chip |
+| --- | --- | --- |
+| MacBook Air (2020) | M1 | BCM4378 |
+| MacBook Pro 13-inch (2020) | M1 | BCM4378 |
+| Mac mini (2020) | M1 | BCM4378 |
+| iMac 24-inch (2021) | M1 | BCM4378 |
+| MacBook Pro 13-inch (2022) | M2 | BCM4378 |
+| Mac mini (2023) | M2, M2 Pro | BCM4388 |
+| MacBook Pro 14-inch and 16-inch (2023) | M2 Pro, M2 Max | BCM4388 |
+| Mac Studio (2023) | M2 Max, M2 Ultra | BCM4388 |
+| Mac Pro (2023) | M2 Ultra | BCM4388, reported; Asahi's device tree is inconsistent for this model |
+
+The Apple chip doesn't determine the Wi-Fi chip, so check yours with `lspci -nn | grep -i network`: BCM4378 is `14e4:4425`, BCM4387 is `14e4:4433`, and BCM4388 is `14e4:4434`. Sources: the [Asahi device list](https://asahilinux.org/docs/hw/devices/device-list/), [Asahi's WLAN PCI IDs](https://github.com/AsahiLinux/linux/blob/asahi/drivers/net/wireless/broadcom/brcm80211/include/brcm_hw_ids.h), and an [Apple device-tree radio inventory](https://gist.github.com/JJTech0130/bf7dbc5b4ea1442a07bbd58bb1ae89c4).
+
+### Testing another Mac
+
+The module doesn't check the chip ID: it builds and loads on any `brcmfmac` card, and firmware without AWDL fails when `awdl0` is created. Recovering a wedged firmware means reloading `brcmfmac`, which drops Wi-Fi, so test where you can afford to lose the network briefly.
+
+Reports from BCM4378 and BCM4388 owners are the most useful thing right now. [Open an issue](https://github.com/brentkearney/omdrop-awdl/issues) with:
+
+- Mac model, year, and Apple chip, plus the WLAN ID from `lspci -nn`.
+- Kernel version, package version, and Wi-Fi firmware version if you have it.
+- How far it got: `awdl0` created, peers found, names resolved, a file sent, a file received.
+- Relevant errors or logs, with personal data removed.
+  
 ## Maintenance
 
 The patches apply to `asahi-7.1.13-3` (commit `94fb2334`), the tree vendored in `kernel/`, and touch fourteen files, all in `drivers/net/wireless/broadcom/brcm80211/brcmfmac/`. The pin is deliberate, so a rebase conflict shows up at build time rather than at runtime. [kernel/PROVENANCE.md](kernel/PROVENANCE.md) has the re-vendoring steps, and `tests/check-patch-drift` checks whether the patches apply to a newer tag.
