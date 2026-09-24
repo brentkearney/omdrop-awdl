@@ -1,0 +1,50 @@
+name: Hardware report
+description: Tell us how Omdrop works, or doesn't, on your Mac.
+title: "Hardware report: "
+labels: ["hardware report"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Thanks for testing. Reports from Macs with a BCM4378 or BCM4388 are the most useful right now, whether it works or not.
+
+        Before installing: if your Wi-Fi firmware lacks AWDL, creating `awdl0` fails, and recovering means reloading `brcmfmac`, which drops Wi-Fi for a moment. Test when you can afford to lose the network briefly.
+
+  - type: textarea
+    id: system
+    attributes:
+      label: System information
+      description: |
+        Run this in a terminal and paste the whole output:
+
+        ```bash
+        { tr -d '\0' < /proc/device-tree/model; echo; lspci -nn | grep -i network; uname -r; pacman -Q brcmfmac-awdl-dkms; omdrop --version; journalctl -k -b | grep -m1 'brcmfmac.*Firmware:'; ip -br link show awdl0; } 2>&1
+        ```
+      render: text
+    validations:
+      required: true
+
+  - type: checkboxes
+    id: progress
+    attributes:
+      label: How far did it get?
+      description: Tick everything that worked.
+      options:
+        - label: "`awdl0` was created (the last line above shows it)"
+        - label: "Nearby Apple devices appear in `omdrop peers`, or as dots on the radar"
+        - label: "Names resolve in `omdrop peers -n`, or in the Send to peers list"
+        - label: A file sent from this Mac arrived on an Apple device
+        - label: A file sent from an Apple device arrived on this Mac
+
+  - type: input
+    id: peers
+    attributes:
+      label: Apple devices you tested with
+      description: For example, "iPhone 15 on iOS 26, MacBook Air M3 on macOS 26". Say whether each was set to Everyone or Contacts Only.
+
+  - type: textarea
+    id: errors
+    attributes:
+      label: Errors or logs
+      description: Anything that failed, and what it printed. Remove personal data such as names, email addresses, and phone numbers.
+      render: text
