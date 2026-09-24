@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Send a file to an AWDL peer without waiting for an mDNS advert.
+"""Send files to an AWDL peer without waiting for an mDNS advert.
 
 2026-09-18: two transfers landed on a Mac by dialling its EUI-64 link-local
 directly. Discovery was never the problem and mDNS was never the channel -- a
@@ -450,7 +450,8 @@ def peer_names(macs, port, sender_name, with_wake=True):
 def main():
     ap = argparse.ArgumentParser(description=__doc__,
                                  formatter_class=argparse.RawDescriptionHelpFormatter)
-    ap.add_argument("file", nargs="?", help="file to send")
+    ap.add_argument("files", nargs="*", metavar="file",
+                    help="files to send, as one transfer the peer accepts once")
     ap.add_argument("--mac", metavar="NAME|ADDRESS",
                     help="who to send to: a peer name, or part of its address. "
                          "Default is the only device heard")
@@ -514,7 +515,7 @@ def main():
             print(line)
         return 0
 
-    if not args.file:
+    if not args.files:
         ap.error("a file is required unless --list")
     if args.mac:
         want = args.mac.lower()
@@ -569,8 +570,9 @@ def main():
         return 2
 
     target = f"[{link_local(mac)}%{IFACE}]:{args.port}"
+    # "--" so a file whose name begins with a dash is a file, not an option.
     cmd = [sys.executable, SENDER, "--direct", target,
-           "--op-timeout", str(args.op_timeout), "--name", args.name, args.file]
+           "--op-timeout", str(args.op_timeout), "--name", args.name, "--", *args.files]
     if args.show:
         print(" ".join(cmd))
         return 0
@@ -593,7 +595,8 @@ def main():
                   f"sheet or receive something to wake sharingd", file=sys.stderr)
             return 3
 
-    print(f"sending {args.file} to {mac} at {target}", file=sys.stderr)
+    what = args.files[0] if len(args.files) == 1 else f"{len(args.files)} files"
+    print(f"sending {what} to {mac} at {target}", file=sys.stderr)
     return subprocess.run(cmd).returncode
 
 

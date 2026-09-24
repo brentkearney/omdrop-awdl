@@ -1,9 +1,11 @@
 #!/usr/bin/env python3
-"""Send one file over AirDrop from awdl0 to a Mac (the f0010 -> hume direction).
+"""Send files over AirDrop from awdl0 to a Mac (the f0010 -> hume direction).
 
 Browse `_airdrop._tcp` on awdl0, pick the receiver named by --to (substring of
 its Discover name or its 12-hex service id; first discoverable one if absent),
 then Discover -> Ask -> Upload on one TLS connection, as OpenDrop's client does.
+Several files go as one transfer: one /Ask listing them all, so the receiver
+answers a single prompt, and one /Upload archive holding them all.
 The Mac must be receiving (Finder > AirDrop open, or woken by BLE); it answers
 /Discover only in that state, and /Ask blocks until its user accepts.
 
@@ -68,7 +70,8 @@ if not hasattr(PIL.Image, 'ANTIALIAS'):
 
 ap = argparse.ArgumentParser()
 # Optional, because --discover-only asks a peer for its name and sends nothing.
-ap.add_argument('file', nargs='?')
+ap.add_argument('files', nargs='*', metavar='file',
+                help='files to send, as one transfer the receiver accepts once')
 ap.add_argument('--iface', default='awdl0')
 ap.add_argument('--discover-only', action='store_true',
                 help='ask the peer for its name over /Discover, print it, and send nothing')
@@ -96,8 +99,13 @@ ap.add_argument('--host', default='f0010-awdl')
 ap.add_argument('--keys', default=os.path.join(pwd.getpwuid(os.getuid()).pw_dir, '.opendrop'))
 args = ap.parse_args()
 OP_TIMEOUT = args.op_timeout
-if not args.discover_only and not args.file:
+if not args.discover_only and not args.files:
     ap.error('a file is required unless --discover-only')
+# The archive stores each file as "./<basename>", as sharingd does, so two
+# files with one name would land as one, and which survived would be luck.
+names = [os.path.basename(f) for f in args.files]
+if len(set(names)) != len(names):
+    ap.error('two of the files have the same name; the receiver would keep only one')
 if args.discover_only and not args.direct:
     ap.error('--discover-only needs --direct HOST:PORT, the peer to ask')
 # A name lookup is not a transfer: keep the debug stream off stdout so the
@@ -448,7 +456,7 @@ client.http_conn.sock.settimeout(args.ask_timeout)
 # END ask-connection
 t1 = time.monotonic()
 try:
-    ok = client.send_ask(args.file)
+    ok = client.send_ask(args.files)
 except Exception as e:
     log.info('%s ASK failed: %r', t(), e)
     sys.exit(3)
@@ -456,12 +464,13 @@ log.info('%s ASK -> %s (%.2fs)', t(), 'accepted' if ok else 'declined', time.mon
 if not ok:
     sys.exit(3)
 t1 = time.monotonic()
-size = os.path.getsize(args.file)
+size = sum(os.path.getsize(f) for f in args.files)
 try:
-    ok = client.send_upload(args.file)
+    ok = client.send_upload(args.files)
 except Exception as e:
     log.info('%s UPLOAD failed: %r', t(), e)
     sys.exit(4)
-log.info('%s UPLOAD %s -> %s (%d B, %.2fs)', t(), os.path.basename(args.file), 'ok' if ok else 'FAILED', size,
+what = names[0] if len(names) == 1 else f'{len(names)} files'
+log.info('%s UPLOAD %s -> %s (%d B, %.2fs)', t(), what, 'ok' if ok else 'FAILED', size,
          time.monotonic() - t1)
 sys.exit(0 if ok else 4)

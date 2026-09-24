@@ -49,7 +49,7 @@ If a kernel update breaks the DKMS build, the stock `brcmfmac` loads instead: DK
 | `/usr/src/brcmfmac-awdl-<ver>/` | Patched `brcmfmac` sources, built by DKMS for every kernel |
 | `/usr/lib/omdrop/omdrop-discoverable` | Opens and closes a bounded discoverability window |
 | `/usr/lib/omdrop/awdl-up` | Creates and configures `awdl0`; run at boot by `awdl0.service` |
-| `/usr/lib/omdrop/send-to-peer` | Lists peers and sends a file to one |
+| `/usr/lib/omdrop/send-to-peer` | Lists peers and sends files to one |
 | `/usr/lib/omdrop/airdrop-send.py` | The sender: `/Discover`, `/Ask`, and `/Upload` over TLS on `awdl0` |
 | `/usr/lib/omdrop/awdl-resolve` | Reads a peer's advertised AirDrop service from its action frames |
 | `/usr/lib/omdrop/*.py` | Helpers for the tools above |
@@ -88,9 +88,10 @@ With a window open:
 /usr/lib/omdrop/send-to-peer FILE                 # the only peer heard
 /usr/lib/omdrop/send-to-peer --mac e2:9d:.. FILE  # choose a peer
 /usr/lib/omdrop/send-to-peer --wait 120 FILE      # keep trying while an iPhone sleeps
+/usr/lib/omdrop/send-to-peer FILE1 FILE2 ...      # several files, as one transfer
 ```
 
-The recipient's prompt shows the `--name` value, `Omarchy` by default.
+The recipient's prompt shows the `--name` value, `Omarchy` by default. Several files go as one transfer, so the recipient accepts them once. Files must have different names, because the recipient stores each under its name alone.
 
 The sender doesn't wait for mDNS. A peer's address is the EUI-64 link-local of its AWDL MAC, and its port comes from the service it advertises. A Mac with no Finder AirDrop window open publishes nothing over mDNS but still listens, so waiting for mDNS would miss it. An iPhone opens its listener only for a few seconds around other AirDrop activity, so `--wait` polls and sends the moment it opens. Opening a share sheet on the phone brings its listener up.
 
