@@ -4,7 +4,7 @@ AWDL for Apple Silicon Macs on Linux: twelve patches to `brcmfmac`, a DKMS packa
 
 AWDL (Apple Wireless Direct Link) is the link layer AirDrop and AirPlay run over. These patches expose the Wi-Fi firmware's own AWDL implementation as an `awdl0` interface, instead of reimplementing the protocol in userspace.
 
-This is the driver half of [Omdrop](https://github.com/brentkearney/omdrop-plugin), AirDrop for [Omarchy M](https://github.com/omacom/omarchy-mac). The functional patches are also proposed for the distribution kernel in [omacom/linux#11](https://github.com/omacom/linux/pull/11).
+This is the driver half of [Omdrop](https://github.com/brentkearney/omdrop-plugin), AirDrop for [Omarchy M](https://github.com/omacom/omarchy-mac). The functional patches are also proposed for Omarchy's `linux-aurora` kernel in [aurora-silicon/linux#24](https://github.com/aurora-silicon/linux/pull/24).
 
 - [Install](#install)
 - [What the package installs](#what-the-package-installs)

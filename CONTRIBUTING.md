@@ -1,6 +1,6 @@
 # Contributing
 
-Kernel work here is a patch series against [omacom/linux](https://github.com/omacom/linux) `asahi`, carried in `patches/` and applied by the PKGBUILD at build time. Userspace under `userspace/` ships as ordinary files.
+Kernel work here is a patch series against [aurora-silicon/linux](https://github.com/aurora-silicon/linux) `aurora-wip`, the tree Omarchy's `linux-aurora` kernel builds from. It's carried in `patches/` and applied by the PKGBUILD at build time. Userspace under `userspace/` ships as ordinary files.
 
 The main thing this project needs is **results from Wi-Fi chips other than the BCM4387** (`14e4:4433`). Nothing in the patches gates on a chip id, so the module builds and loads anywhere `brcmfmac` does; what differs is whether the firmware accepts an AWDL interface. Report `lspci -nn | grep -i network` with any outcome, working or not.
 
@@ -11,11 +11,11 @@ The main thing this project needs is **results from Wi-Fi chips other than the B
 So send kernel changes as commits against the kernel tree:
 
 ```sh
-git clone https://github.com/omacom/linux -b asahi
+git clone https://github.com/aurora-silicon/linux -b aurora-wip
 cd linux
 git am /path/to/omdrop-awdl/patches/*.patch     # the current series
 # ... your work, committed with git commit -s ...
-git format-patch --no-numbered origin/asahi
+git format-patch --no-numbered origin/aurora-wip
 ```
 
 Send the resulting `.patch` files, or open a PR against this repository that adds or replaces files in `patches/` with them. Either way the `From:`, `Signed-off-by:`, and any `Co-developed-by:` trailers travel with the work, and `git am` reproduces your authorship byte for byte when the series goes upstream.
@@ -24,7 +24,7 @@ Send the resulting `.patch` files, or open a PR against this repository that add
 
 Yours entirely. `git commit -s` writes your `Signed-off-by:`; `format-patch` writes your `From:`. Nothing else to do.
 
-When the series goes to `omacom/linux`, the maintainer here adds a second `Signed-off-by:` beneath yours. That is the kernel's chain of custody — every person who passes a patch along signs it — and not a claim on your work. Your `From:` is unchanged and the commit stays yours upstream.
+When the series goes to `aurora-silicon/linux`, the maintainer here adds a second `Signed-off-by:` beneath yours. That is the kernel's chain of custody — every person who passes a patch along signs it — and not a claim on your work. Your `From:` is unchanged and the commit stays yours upstream.
 
 ### A change to an existing patch
 
@@ -56,11 +56,11 @@ Order matters. The tree's own rule: the sign-offs "should reflect the chronologi
 
 ### Kernel style
 
-`omacom/linux` carries no contribution guide of its own; it defers to the in-tree documents, and so does this project:
+`aurora-silicon/linux` carries no contribution guide of its own; it defers to the in-tree documents, and so does this project:
 
-- [`Documentation/process/submitting-patches.rst`](https://github.com/omacom/linux/blob/asahi/Documentation/process/submitting-patches.rst)
+- [`Documentation/process/submitting-patches.rst`](https://github.com/aurora-silicon/linux/blob/aurora-wip/Documentation/process/submitting-patches.rst)
   for commit messages, trailers, and sign-off.
-- [`Documentation/process/coding-style.rst`](https://github.com/omacom/linux/blob/asahi/Documentation/process/coding-style.rst)
+- [`Documentation/process/coding-style.rst`](https://github.com/aurora-silicon/linux/blob/aurora-wip/Documentation/process/coding-style.rst)
   for the code itself.
 
 Run the tree's own checker before sending a kernel patch, and fix what it reports about your own lines:
@@ -75,7 +75,7 @@ Two destinations, different processes, and it matters which one you are aiming a
 
 | destination | how |
 | --- | --- |
-| [omacom/linux](https://github.com/omacom/linux) `asahi` — Omarchy's Asahi fork | GitHub pull request |
+| [aurora-silicon/linux](https://github.com/aurora-silicon/linux) `aurora-wip` — the Asahi fork Omarchy's `linux-aurora` builds from | GitHub pull request |
 | mainline `brcmfmac` | email to `linux-wireless@vger.kernel.org` and the Broadcom maintainers in `MAINTAINERS`; `brcmfmac` takes no pull requests |
 
 This project targets the fork. A patch that belongs upstream is welcome too, but send it the way upstream expects.
