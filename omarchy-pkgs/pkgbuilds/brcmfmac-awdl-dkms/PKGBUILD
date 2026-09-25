@@ -9,24 +9,26 @@
 # AWDL, never the network.
 
 pkgname=brcmfmac-awdl-dkms
-pkgver=0.1.1
+pkgver=0.6.0
 pkgrel=1
-_asahitag=asahi-7.1.13-2
+_asahitag=asahi-7.1.13-3
 pkgdesc="AWDL (AirDrop link layer) support for the BCM4387: DKMS module and root helpers"
 arch=('aarch64')
 url="https://github.com/brentkearney/omdrop-awdl"
 license=('GPL-2.0-only')
 # The helpers are bash and python3 and drive the radio through ip(8), ping(8),
 # flock(1), setsid(1) and pgrep(1). polkit is what lets an unprivileged desktop
-# session invoke the one helper that needs root.
+# session invoke the one helper that needs root. The sender, airdrop-send.py,
+# draws its /Ask icon with Pillow and packs its /Upload with libarchive;
+# zeroconf and ifaddr are its mDNS browse, used when it runs without --direct.
 depends=('dkms' 'bash' 'python' 'iproute2' 'iputils' 'kmod' 'polkit'
-         'procps-ng' 'util-linux' 'systemd')
+         'procps-ng' 'util-linux' 'systemd'
+         'python-libarchive-c' 'python-pillow' 'python-zeroconf' 'python-ifaddr')
 makedepends=()        # prepare() patches with patch(1), which base-devel has
 optdepends=('networkmanager: keeps awdl0 unmanaged and settles the Wi-Fi MAC before awdl0 is derived from it'
-            'opendrop: the AirDrop receiver the omdrop plugin runs on top of this (AUR; there is no python-opendrop)'
-            'bluez: the opt-in BLE Continuity advert'
-            'python-dbus: the opt-in BLE Continuity advert'
-            'python-gobject: the opt-in BLE Continuity advert')
+            'bluez: waking a peer to ask its name, and the opt-in advert'
+            'python-dbus: waking a peer to ask its name, and the opt-in advert'
+            'python-gobject: waking a peer to ask its name, and the opt-in advert')
 install="${pkgname}.install"
 
 # The three directories DKMS actually compiles, vendored pristine from Asahi's
@@ -42,7 +44,8 @@ install="${pkgname}.install"
 #   git archive <tag> drivers/net/wireless/broadcom/brcm80211/{brcmfmac,brcmutil,include} | tar -x -C kernel
 # and re-check the patches. Keeping the kernel path prefix is what lets them
 # apply with -p1 exactly as they would upstream.
-_asahicommit=13aba96fb344feb5708d998c54331a719431a3db
+# The tag is annotated, so this is the commit it points at, not the tag object.
+_asahicommit=94fb23346d522edf53722357c426a3e58030beea
 # makepkg's source array takes files, not directories, so the vendored tree and
 # the rest of the checkout are read from ${srcdir}/omdrop-awdl-${pkgver} the way they always were.
 # prepare() copies the kernel sources into ${srcdir} first: patching in place
@@ -58,10 +61,11 @@ source=("$pkgname-$pkgver.tar.gz::$url/archive/v$pkgver.tar.gz"
         "0008-brcmfmac-msgbuf-tolerate-txstatus-for-a-freed-flowri.patch"
         "0009-brcmfmac-p2p-log-action-frame-RX-events-on-the-AWDL-.patch"
         "0010-brcmfmac-p2p-AWDL-action-frame-probe-dumps-the-raw-e.patch"
-        "0011-brcmfmac-p2p-forward-AWDL-action-frames-from-their-s.patch")
+        "0011-brcmfmac-p2p-forward-AWDL-action-frames-from-their-s.patch"
+        "0012-brcmfmac-gate-the-AWDL-instrumentation-behind-a-modul.patch")
 # The tarball's hash is filled in once its tag is pushed; the patches are
 # hashed here.
-sha256sums=('47746373bb5402d583f0fcc9a0bef2f9e3508ed92613cd633457258af18b3e3e'
+sha256sums=('0e829f71c6cfbfec65d3baa294007098f4d6382a78cb4bd7d5c188519919fc95'
             'c5550edeb9b74d9e4eb2a0880ee26bc0588de678f671eca397cde37024a52187'
             'a39bf06b5350a49515e71f9c6c94434e0f0600223f9ddfa398a467e81ad4400f'
             '53a0bd6882a919aa79039d3dbd3599eac1c1e946e5479d6a81cdddc4d68eb2db'
@@ -72,7 +76,8 @@ sha256sums=('47746373bb5402d583f0fcc9a0bef2f9e3508ed92613cd633457258af18b3e3e'
             '3502b04e4be956f341086e0ed89880095374d43921ed70486cee501f6ebe2ec2'
             '6ef23d801afe61d6f0bca96c6061781d39d6db9a039ec8ab18d8664a14a7fda2'
             '2c1fda700b7c71f95f1f937c40ba591b9f7e56c9b26374e7d35bb8f43a3d1126'
-            'dbbfce953f67780c2c124949b4bb6b953cc32e0fe6308fa9c107b28724e17016')
+            'dbbfce953f67780c2c124949b4bb6b953cc32e0fe6308fa9c107b28724e17016'
+            '8ae52926b720ab3035fc6fba736a0833d07d4f2a264c98b86f29ea5b5a4f6ade')
 
 prepare() {
   rm -rf "${srcdir}/kernel"
@@ -110,9 +115,16 @@ package() {
   install -Dm755 "${srcdir}/omdrop-awdl-${pkgver}/userspace/awdl-up" "${lib}/awdl-up"
   local helper
   for helper in awdl-airdrop-adv awdl-election awdl-mdns-respond awdl-peer-watch \
-                awdl-peers awdl-stats ble-airdrop-adv brcm_iovar mkpsf; do
+                awdl-peers awdl-stats ble-airdrop-adv brcm_iovar mkpsf \
+                awdl-af-parse airdrop-send; do
     install -Dm755 "${srcdir}/omdrop-awdl-${pkgver}/userspace/${helper}.py" "${lib}/${helper}.py"
   done
+  # Sending. Proven 2026-09-18 to a Mac and an iPhone: dial the peer's EUI-64
+  # link-local on the port it advertises, rather than waiting for an mDNS
+  # advert a Mac never publishes. Neither needs root -- they read the peer
+  # table through the helper above.
+  install -Dm755 "${srcdir}/omdrop-awdl-${pkgver}/userspace/send-to-peer" "${lib}/send-to-peer"
+  install -Dm755 "${srcdir}/omdrop-awdl-${pkgver}/userspace/awdl-resolve" "${lib}/awdl-resolve"
   # Imported, never executed: the machine identity and tunables every helper
   # above reads instead of carrying a baked-in MAC or hostname.
   install -Dm644 "${srcdir}/omdrop-awdl-${pkgver}/userspace/awdl_identity.py" "${lib}/awdl_identity.py"
