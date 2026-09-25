@@ -35,7 +35,22 @@ TOOLS = os.path.dirname(os.path.abspath(__file__))
 HELPER = os.path.join(TOOLS, "omdrop-discoverable")
 SENDER = os.path.join(TOOLS, "airdrop-send.py")
 ADVERTISER = os.path.join(TOOLS, "ble-airdrop-adv.py")
-RECORD = os.path.expanduser("~/.opendrop/keys/validation_record.cms")
+def identity_dir(home):
+    """Where this user's AirDrop identity lives: ~/.omdrop since 0.6.1.
+
+    Omdrop copies an existing ~/.opendrop/keys there once and leaves the
+    original in place. Until that copy exists -- an older plugin, or a sender
+    run before the first window -- keep reading ~/.opendrop, so a sender never
+    creates a fresh self-signed identity beside an Apple ID one.
+    """
+    new = os.path.join(home, '.omdrop')
+    old = os.path.join(home, '.opendrop')
+    if os.path.isdir(os.path.join(new, 'keys')) or not os.path.isdir(os.path.join(old, 'keys')):
+        return new
+    return old
+
+
+RECORD = os.path.join(identity_dir(os.path.expanduser("~")), "keys", "validation_record.cms")
 AIRDROP_PORT = 8770
 IFACE = "awdl0"
 WAKE_SECONDS = 30      # ceiling; the advert dies with the listing either way

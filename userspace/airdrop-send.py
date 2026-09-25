@@ -173,6 +173,21 @@ class AirDropBrowser:
         self.zeroconf.close()
 
 
+def identity_dir(home):
+    """Where this user's AirDrop identity lives: ~/.omdrop since 0.6.1.
+
+    Omdrop copies an existing ~/.opendrop/keys there once and leaves the
+    original in place. Until that copy exists -- an older plugin, or a sender
+    run before the first window -- keep reading ~/.opendrop, so a sender never
+    creates a fresh self-signed identity beside an Apple ID one.
+    """
+    new = os.path.join(home, '.omdrop')
+    old = os.path.join(home, '.opendrop')
+    if os.path.isdir(os.path.join(new, 'keys')) or not os.path.isdir(os.path.join(old, 'keys')):
+        return new
+    return old
+
+
 ap = argparse.ArgumentParser()
 # Optional, because --discover-only asks a peer for its name and sends nothing.
 ap.add_argument('files', nargs='*', metavar='file',
@@ -203,7 +218,7 @@ ap.add_argument('--model', default='MacBookPro18,3', help='SenderModelName')
 # The sender advertises nothing, so it has no use for a host label; kept so
 # existing command lines keep working.
 ap.add_argument('--host', default='f0010-awdl', help='unused by the sender')
-ap.add_argument('--keys', default=os.path.join(pwd.getpwuid(os.getuid()).pw_dir, '.opendrop'),
+ap.add_argument('--keys', default=identity_dir(pwd.getpwuid(os.getuid()).pw_dir),
                 help='directory holding keys/certificate.pem, keys/key.pem and, if there is one, '
                      'keys/validation_record.cms')
 args = ap.parse_args()

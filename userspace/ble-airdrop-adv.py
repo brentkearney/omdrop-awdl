@@ -77,6 +77,21 @@ def redact(value):
     slots = h[22:38]
     return h if set(slots) == {'0'} else h[:22] + 'xx' * 8 + h[38:]
 
+def identity_dir(home):
+    """Where this user's AirDrop identity lives: ~/.omdrop since 0.6.1.
+
+    Omdrop copies an existing ~/.opendrop/keys there once and leaves the
+    original in place. Until that copy exists -- an older plugin, or a sender
+    run before the first window -- keep reading ~/.opendrop, so a sender never
+    creates a fresh self-signed identity beside an Apple ID one.
+    """
+    new = os.path.join(home, '.omdrop')
+    old = os.path.join(home, '.opendrop')
+    if os.path.isdir(os.path.join(new, 'keys')) or not os.path.isdir(os.path.join(old, 'keys')):
+        return new
+    return old
+
+
 def default_record():
     """Where the invoking user's Apple ID validation record lives.
 
@@ -94,8 +109,8 @@ def default_record():
                 home = pwd.getpwuid(int(uid)).pw_dir
             except KeyError:
                 continue
-            return os.path.join(home, '.opendrop/keys/validation_record.cms')
-    return os.path.expanduser('~/.opendrop/keys/validation_record.cms')
+            return os.path.join(identity_dir(home), 'keys', 'validation_record.cms')
+    return os.path.join(identity_dir(os.path.expanduser('~')), 'keys', 'validation_record.cms')
 
 
 DEFAULT_RECORD = default_record()
