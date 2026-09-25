@@ -193,6 +193,32 @@ RELOAD=0
 [[ ${1:-} == --reload ]] && RELOAD=1
 [[ $EUID -eq 0 ]] || { echo "needs root" >&2; exit 1; }
 
+# NM must not manage awdl0: a managed awdl0 gets a randomised MAC and no
+# link-local, which voids every address the peers target. The package ships the
+# vendor copy; this only writes /etc when neither file is present, so a removed
+# or edited setting is not silently reinstated.
+if [[ ! -f $NMCONF && ! -f $NMCONF_VENDOR ]]; then
+  printf '[keyfile]\nunmanaged-devices=interface-name:awdl0\n' > "$NMCONF"
+  log "wrote $NMCONF"
+fi
+
+# A setting on disk is not a setting in force: NetworkManager reads conf.d only
+# at startup or on a reload, so installing the package on a running system
+# left awdl0 managed -- no link-local, nothing able to bind -- until the next
+# reboot (issue 15). Reload whenever awdl0 is not yet unmanaged, or does not
+# exist yet, so a new one is born unmanaged. `reload conf` rereads the
+# configuration only; it touches no connection.
+nm_release(){
+  command -v nmcli >/dev/null 2>&1 || return 0
+  systemctl is-active --quiet NetworkManager 2>/dev/null || return 0
+  local state
+  state=$(nmcli -g GENERAL.STATE device show "$IF" 2>/dev/null)
+  [[ $state == *'(unmanaged)'* ]] && return 0
+  nmcli general reload conf >/dev/null 2>&1 || { log "NetworkManager would not reload its configuration"; return 0; }
+  [[ -n $state ]] && log "NetworkManager was managing $IF ($state); reloaded its configuration: $(nmcli -g GENERAL.STATE device show "$IF" 2>/dev/null)"
+  return 0
+}
+
 # Already there. Re-running must never disturb a live interface (a
 # `systemctl restart` mid-session is expected) -- but it MUST be able to
 # re-apply the schedule, because chan_seq and sync_params are SET-only while
@@ -205,21 +231,13 @@ if (( RELOAD )); then
   # awdl0 died with the module; fall through to the create path below, which
   # waits for the permanent MAC and writes the schedule into fresh firmware.
 elif ip link show "$IF" >/dev/null 2>&1; then
+  nm_release
   ip link set "$IF" up 2>/dev/null
   log "$IF already present: $(ip -br link show "$IF")"
   reconfigure_or_skip
   exit 0
 fi
-
-# NM must not manage awdl0: a managed awdl0 gets a randomised MAC and no
-# link-local, which voids every address the peers target. The package ships the
-# vendor copy; this only writes /etc when neither file is present, so a removed
-# or edited setting is not silently reinstated.
-if [[ ! -f $NMCONF && ! -f $NMCONF_VENDOR ]]; then
-  printf '[keyfile]\nunmanaged-devices=interface-name:awdl0\n' > "$NMCONF"
-  nmcli general reload 2>/dev/null || systemctl reload NetworkManager 2>/dev/null
-  log "wrote $NMCONF"
-fi
+nm_release
 
 wait_sta || { log "no Broadcom Wi-Fi interface after ${WAIT_STA}s -- is the patched driver installed?"; exit 4; }
 # NetworkManager randomises the Wi-Fi MAC for the pre-association scan and

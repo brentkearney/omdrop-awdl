@@ -1,4 +1,12 @@
 post_install() {
+  # NetworkManager reads conf.d only at startup or on a reload, so the
+  # unmanaged setting for awdl0 this package installs is not in force on a
+  # running system until something rereads it (issue 15). `reload conf` touches
+  # no connection. systemctl answers "inactive" in a chroot, which skips it.
+  if systemctl is-active --quiet NetworkManager 2>/dev/null; then
+    nmcli general reload conf >/dev/null 2>&1 \
+      || echo "  Could not reload NetworkManager's configuration. Run: sudo nmcli general reload conf"
+  fi
   cat <<'MSG'
   This package replaces the in-tree brcmfmac through DKMS, and rebuilds itself
   on every kernel install. The running kernel still has the module it booted

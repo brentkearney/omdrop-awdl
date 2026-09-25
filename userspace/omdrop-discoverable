@@ -102,6 +102,27 @@ awdl0_ready(){
 # two used to be conflated into one wrong message.
 driver_loaded(){ [[ -d /sys/module/brcmfmac ]]; }
 
+# NetworkManager's view of awdl0, e.g. "10 (unmanaged)"; empty when there is
+# no NetworkManager or it does not know the device.
+nm_state(){
+  command -v nmcli >/dev/null 2>&1 || return 0
+  systemctl is-active --quiet NetworkManager 2>/dev/null || return 0
+  nmcli -g GENERAL.STATE device show "$IF" 2>/dev/null
+}
+
+# The same check awdl-up makes: a managed awdl0 gets no link-local, and the
+# package's unmanaged setting is only in force once NetworkManager has reread
+# its configuration (issue 15). `reload conf` touches no connection.
+nm_release(){
+  local state; state=$(nm_state)
+  [[ -z $state || $state == *'(unmanaged)'* ]] && return 0
+  if nmcli general reload conf >/dev/null 2>&1; then
+    log "NetworkManager was managing $IF ($state); reloaded its configuration: $(nm_state)"
+  else
+    log "NetworkManager is managing $IF ($state) and would not reload its configuration"
+  fi
+}
+
 # The only honest test of the data path: submit a burst and count the per-frame
 # completions the firmware logs. A parked firmware parses PSFs, fills its peer
 # table and elects normally while transmitting nothing, so peer state, opmode
@@ -616,6 +637,12 @@ cmd_start(){
     fi
     die 4 "AirDrop's Wi-Fi driver is not loaded, so this machine cannot be discovered. Restart to load it."
   fi
+  # An awdl0 that already exists skips awdl-up, so check NetworkManager here
+  # too: installed on a running system, the package's unmanaged setting is not
+  # in force until NetworkManager rereads its configuration (issue 15). Before
+  # the gate, whose awdl toggle recreates the netdev, so the new one is left
+  # alone and gets its link-local.
+  nm_release
   ip link set "$IF" promisc on 2>/dev/null; ip link set "$IF" allmulticast on 2>/dev/null
 
   gate; GATE_RC=$?
@@ -661,6 +688,9 @@ cmd_start(){
   done
   if ! ip -6 addr show dev "$IF" scope link 2>/dev/null | grep -q inet6; then
     printf no_awdl0 > "$RUN/reason"
+    if [[ $(nm_state) != '' && $(nm_state) != *'(unmanaged)'* ]]; then
+      die 4 "awdl0 has no link-local because NetworkManager is managing it ($(nm_state)). Run: sudo nmcli general reload conf, then try again"
+    fi
     die 4 "awdl0 has no link-local 15 s after the gate -- the data path is up but nothing can bind to it"
   fi
 
