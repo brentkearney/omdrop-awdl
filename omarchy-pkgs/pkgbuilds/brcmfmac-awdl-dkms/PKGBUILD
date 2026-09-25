@@ -9,7 +9,7 @@
 # AWDL, never the network.
 
 pkgname=brcmfmac-awdl-dkms
-pkgver=0.6.0
+pkgver=0.6.1
 pkgrel=1
 _asahitag=asahi-7.1.13-3
 pkgdesc="AWDL (AirDrop link layer) support for the BCM4387: DKMS module and root helpers"
@@ -65,7 +65,7 @@ source=("$pkgname-$pkgver.tar.gz::$url/archive/v$pkgver.tar.gz"
         "0012-brcmfmac-gate-the-AWDL-instrumentation-behind-a-modul.patch")
 # The tarball's hash is filled in once its tag is pushed; the patches are
 # hashed here.
-sha256sums=('0e829f71c6cfbfec65d3baa294007098f4d6382a78cb4bd7d5c188519919fc95'
+sha256sums=('dcb42917cf3693d35731262f2eaea68cb026ea89e3ff5bad7ae1dfd7e751030d'
             'c5550edeb9b74d9e4eb2a0880ee26bc0588de678f671eca397cde37024a52187'
             'a39bf06b5350a49515e71f9c6c94434e0f0600223f9ddfa398a467e81ad4400f'
             '53a0bd6882a919aa79039d3dbd3599eac1c1e946e5479d6a81cdddc4d68eb2db'
