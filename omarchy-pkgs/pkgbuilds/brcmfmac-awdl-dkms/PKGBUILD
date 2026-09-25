@@ -1,6 +1,6 @@
 # Maintainer: Brent Kearney <1550934+brentkearney@users.noreply.github.com>
 #
-# AWDL support for the BCM4387: a DKMS module, plus the root-side userspace the
+# AWDL support for Apple's Broadcom Wi-Fi (BCM4378, BCM4387, BCM4388): a DKMS module, plus the root-side userspace the
 # omdrop plugin drives it through.
 #
 # The patched brcmfmac installs to updates/dkms/, which depmod prefers over the
@@ -9,10 +9,10 @@
 # AWDL, never the network.
 
 pkgname=brcmfmac-awdl-dkms
-pkgver=0.6.1
+pkgver=0.6.2
 pkgrel=1
 _asahitag=asahi-7.1.13-3
-pkgdesc="AWDL (AirDrop link layer) support for the BCM4387: DKMS module and root helpers"
+pkgdesc="AWDL (AirDrop link layer) support for Apple Broadcom Wi-Fi (BCM4378, BCM4387, BCM4388): DKMS module and root helpers"
 arch=('aarch64')
 url="https://github.com/brentkearney/omdrop-awdl"
 license=('GPL-2.0-only')
@@ -65,7 +65,7 @@ source=("$pkgname-$pkgver.tar.gz::$url/archive/v$pkgver.tar.gz"
         "0012-brcmfmac-gate-the-AWDL-instrumentation-behind-a-modul.patch")
 # The tarball's hash is filled in once its tag is pushed; the patches are
 # hashed here.
-sha256sums=('dcb42917cf3693d35731262f2eaea68cb026ea89e3ff5bad7ae1dfd7e751030d'
+sha256sums=('8eb81da51a6546b813684a3d8142af6eb4cf7782c868b42946ac2f6b30f839c5'
             'c5550edeb9b74d9e4eb2a0880ee26bc0588de678f671eca397cde37024a52187'
             'a39bf06b5350a49515e71f9c6c94434e0f0600223f9ddfa398a467e81ad4400f'
             '53a0bd6882a919aa79039d3dbd3599eac1c1e946e5479d6a81cdddc4d68eb2db'
