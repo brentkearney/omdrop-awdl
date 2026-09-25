@@ -6,7 +6,7 @@ body:
   - type: markdown
     attributes:
       value: |
-        Thanks for testing. Reports from Macs with a BCM4378 or BCM4388 are the most useful right now, whether it works or not.
+        Thanks for testing. Every Mac not yet in the README's Known to work table is useful, whether it works or not. So is sending from a BCM4378 or BCM4388, which nobody has confirmed yet.
 
         Before installing: if your Wi-Fi firmware lacks AWDL, creating `awdl0` fails, and recovering means reloading `brcmfmac`, which drops Wi-Fi for a moment. Test when you can afford to lose the network briefly.
 

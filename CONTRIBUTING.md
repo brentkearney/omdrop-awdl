@@ -2,7 +2,7 @@
 
 Kernel work here is a patch series against [aurora-silicon/linux](https://github.com/aurora-silicon/linux) `aurora-wip`, the tree Omarchy's `linux-aurora` kernel builds from. It's carried in `patches/` and applied by the PKGBUILD at build time. Userspace under `userspace/` ships as ordinary files.
 
-The main thing this project needs is **results from Wi-Fi chips other than the BCM4387** (`14e4:4433`). Nothing in the patches gates on a chip id, so the module builds and loads anywhere `brcmfmac` does; what differs is whether the firmware accepts an AWDL interface. Report `lspci -nn | grep -i network` with any outcome, working or not.
+The main thing this project needs is **results from more Macs**, above all sending from a BCM4378 (`14e4:4425`) or BCM4388 (`14e4:4434`). Receiving is confirmed on all three chips, but sending only on the BCM4387 (`14e4:4433`). Nothing in the patches gates on a chip id, so the module builds and loads anywhere `brcmfmac` does; what differs is whether the firmware accepts an AWDL interface. Report `lspci -nn | grep -i network` with any outcome, working or not.
 
 ## Kernel changes: send commits, not edited patch files
 
