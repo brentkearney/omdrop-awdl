@@ -801,14 +801,24 @@ cmd_status(){
 # devices can only exchange data inside a tree they share, so "which root is
 # that Mac on" is the question that separates "we are invisible" from "we are in a
 # different tree". Read-only: one GET, no SET, no toggles.
+#
+# Each call gets its own reply file. The panel reads the table every couple of
+# seconds while a name lookup and a send read it too, and with one shared file
+# a call's delete-before-read (see iovar_get_len) wiped another's reply
+# mid-read: 5 of 12 concurrent calls failed "no reply" on 2026-09-24.
 cmd_peers(){
   need_root peers
   mkdir -p "$RUN"
-  local raw=$RUN/advertisers.bin len
+  local raw len rc
+  raw=$(mktemp "$RUN/advertisers.XXXXXX") || { echo "awdl_advertisers: cannot create a reply file in $RUN" >&2; exit 4; }
   len=$(iovar_get_len awdl_advertisers 1024 "$raw")
-  [[ ${len:-0} -gt 0 ]] || { echo "awdl_advertisers: no reply (is AWDL enabled?)" >&2; exit 4; }
-  python3 "$LIB/awdl-peers.py" "$raw"
-  exit 0
+  if [[ ${len:-0} -gt 0 ]]; then
+    python3 "$LIB/awdl-peers.py" "$raw"; rc=$?
+  else
+    echo "awdl_advertisers: no reply (is AWDL enabled?)" >&2; rc=4
+  fi
+  rm -f "$raw"
+  exit "$rc"
 }
 
 # diag: why is the receive side dead? Read-only -- GETs, no SET, no toggle, so
