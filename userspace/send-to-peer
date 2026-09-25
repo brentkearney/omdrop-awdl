@@ -241,7 +241,21 @@ def peers():
     # saying rather than inventing a number.
     for mac in registered_peers():
         found.setdefault(mac, None)
+    # Both sources can include this machine's own AWDL address, which would
+    # then list as a peer (issue 12). No interface, no address to drop.
+    own = own_address()
+    if own:
+        found.pop(own, None)
     return sorted(found.items(), key=lambda p: (p[1] is None, -(p[1] or 0)))
+
+
+def own_address():
+    """This machine's MAC on IFACE, or None when the interface is absent."""
+    try:
+        with open(f"/sys/class/net/{IFACE}/address") as f:
+            return f.read().strip().lower()
+    except OSError:
+        return None
 
 
 def registered_peers():

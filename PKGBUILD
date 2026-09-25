@@ -18,13 +18,15 @@ url="https://github.com/brentkearney/omdrop-awdl"
 license=('GPL-2.0-only')
 # The helpers are bash and python3 and drive the radio through ip(8), ping(8),
 # flock(1), setsid(1) and pgrep(1). polkit is what lets an unprivileged desktop
-# session invoke the one helper that needs root.
+# session invoke the one helper that needs root. The sender, airdrop-send.py,
+# draws its /Ask icon with Pillow and packs its /Upload with libarchive;
+# zeroconf and ifaddr are its mDNS browse, used when it runs without --direct.
 depends=('dkms' 'bash' 'python' 'iproute2' 'iputils' 'kmod' 'polkit'
-         'procps-ng' 'util-linux' 'systemd')
+         'procps-ng' 'util-linux' 'systemd'
+         'python-libarchive-c' 'python-pillow' 'python-zeroconf' 'python-ifaddr')
 makedepends=()        # prepare() patches with patch(1), which base-devel has
 optdepends=('linux-asahi-headers: build against the Asahi kernel'
             'networkmanager: keeps awdl0 unmanaged and settles the Wi-Fi MAC before awdl0 is derived from it'
-            'opendrop: the AirDrop receiver the omdrop plugin runs on top of this (AUR; there is no python-opendrop)'
             # Naming a peer wakes it with a BLE Continuity advert, so these
             # are what `send-to-peer --list --names` needs to reach a device
             # set to Contacts Only. Still optional: without them the lookup

@@ -3,7 +3,7 @@
 
 Browse `_airdrop._tcp` on awdl0, pick the receiver named by --to (substring of
 its Discover name or its 12-hex service id; first discoverable one if absent),
-then Discover -> Ask -> Upload on one TLS connection, as OpenDrop's client does.
+then /Discover on one TLS connection and /Ask -> /Upload on a fresh one.
 Several files go as one transfer: one /Ask listing them all, so the receiver
 answers a single prompt, and one /Upload archive holding them all.
 The Mac must be receiving (Finder > AirDrop open, or woken by BLE); it answers
@@ -16,18 +16,27 @@ Exit: 0 sent | 2 no receiver found in --timeout | 3 declined | 4 upload failed.
 Every step is timestamped to stdout so it lines up with the hold's intervals.
 """
 import argparse
+import io
 import ipaddress
 import logging
 import os
+import plistlib
 import pwd
+import socket
+import ssl
+import subprocess
 import sys
 import threading
 import time
+import uuid
+from http.client import HTTPSConnection
 
-import opendrop.client as od_client
-from opendrop.client import AirDropBrowser, AirDropClient
-from opendrop.config import AirDropConfig, AirDropReceiverFlags
+# Protocol-level lines (each request and its status, the identity in use), on
+# their own logger so the `send` lines callers parse stay the only ones there.
+wire = logging.getLogger('airdrop')
 
+# Bit 0x80 of a receiver's `flags` TXT value: it answers /Discover.
+SUPPORTS_DISCOVER = 0x80
 
 # Every AWDL HTTPS connection (Discover, Ask, Upload) is built through the
 # subclass below, so this is the one place a default operation timeout belongs.
@@ -41,13 +50,13 @@ from opendrop.config import AirDropConfig, AirDropReceiverFlags
 # cost seconds, not a hold.
 OP_TIMEOUT = 20.0
 
-class HTTPSConnectionAWDL(od_client.HTTPSConnectionAWDL):
-    """OpenDrop passes key_file/cert_file to HTTPSConnection.__init__, which
-    Python 3.12 removed; the certificate is already in the SSL context."""
-    def __init__(self, host, port=None, key_file=None, cert_file=None, timeout=None,
-                 source_address=None, *, context=None, check_hostname=None, interface_name=None):
-        import ipaddress, socket
-        from http.client import HTTPSConnection
+class HTTPSConnectionAWDL(HTTPSConnection):
+    """HTTPS to a peer on the AWDL interface.
+
+    A link-local address is ambiguous without a zone, so the interface is
+    appended (fe80::1 -> fe80::1%awdl0); getaddrinfo turns that into the scope
+    id that sends the connection out of awdl0 and nowhere else."""
+    def __init__(self, host, port, *, context, interface_name, timeout=None):
         # A zone index only means something for link-local; "::1%lo" does not resolve.
         if interface_name is not None and '%' not in host:
             ip = ipaddress.ip_address(host)
@@ -55,18 +64,114 @@ class HTTPSConnectionAWDL(od_client.HTTPSConnectionAWDL):
                 host = host + '%' + interface_name
         if timeout is None:
             timeout = OP_TIMEOUT if OP_TIMEOUT else socket.getdefaulttimeout()
-        HTTPSConnection.__init__(self, host=host, port=port, timeout=timeout,
-                                 source_address=source_address, context=context)
-        self.interface_name = interface_name
-        self._create_connection = self.create_connection_awdl
+        super().__init__(host, port, timeout=timeout, context=context)
 
 
-od_client.HTTPSConnectionAWDL = HTTPSConnectionAWDL
+class Config:
+    """Who we are to a receiver, and the TLS identity that says so.
 
-# OpenDrop's icon generator uses PIL.Image.ANTIALIAS, removed in Pillow 10.
-import PIL.Image
-if not hasattr(PIL.Image, 'ANTIALIAS'):
-    PIL.Image.ANTIALIAS = PIL.Image.LANCZOS
+    The identity lives in <keys>/keys/, shared with the receiver
+    (airdrop-serve.py) and laid out as opendrop laid it out, so an existing
+    install keeps its certificate and its Apple ID validation record:
+    certificate.pem, key.pem, and validation_record.cms if there is one."""
+    def __init__(self, keys, computer_name, computer_model, service_id, interface):
+        self.computer_name = computer_name
+        self.computer_model = computer_model
+        self.service_id = service_id
+        self.interface = interface
+        keys = os.path.expanduser(keys)
+        self.key_dir = os.path.join(keys, 'keys')
+        self.debug_dir = os.path.join(keys, 'debug')
+        self.cert_file = os.path.join(self.key_dir, 'certificate.pem')
+        self.key_file = os.path.join(self.key_dir, 'key.pem')
+        if not os.path.exists(self.cert_file) or not os.path.exists(self.key_file):
+            self.create_certificate()
+        record = os.path.join(self.key_dir, 'validation_record.cms')
+        self.record_data = None
+        if os.path.exists(record):
+            with open(record, 'rb') as f:
+                self.record_data = f.read()
+            wire.debug('Apple ID validation record found (%d B)', len(self.record_data))
+        else:
+            wire.debug('no Apple ID validation record; sending without one')
+
+    def create_certificate(self):
+        """A self-signed identity, which is all an Everyone-mode peer asks for,
+        with --name as its CN."""
+        wire.info('no certificate in %s; creating a self-signed one', self.key_dir)
+        os.makedirs(self.key_dir, mode=0o700, exist_ok=True)
+        subprocess.run(['openssl', 'req', '-newkey', 'rsa:2048', '-nodes', '-keyout', 'key.pem',
+                        '-x509', '-days', '365', '-out', 'certificate.pem',
+                        '-subj', f'/CN={self.computer_name}'],
+                       cwd=self.key_dir, capture_output=True, check=True)
+
+    def get_ssl_context(self):
+        """A fresh client context per connection: present our certificate,
+        verify nothing about the peer's. An Everyone-mode peer's certificate is
+        self-signed, and nothing here acts on who signed it. TLS 1.0 stays
+        refused (Python's own floor is already 1.2).
+
+        Apple's root CA is deliberately not loaded. It could only matter to
+        verification, which is off, or to the chain OpenSSL builds for our own
+        certificate -- and an Apple ID leaf is issued by an intermediate that
+        is not in the store, so the leaf goes on its own either way (measured
+        2026-09-25 with this machine's Apple ID certificate: the same
+        one-certificate chain with and without the root loaded)."""
+        ctx = ssl.SSLContext(ssl.PROTOCOL_TLS_CLIENT)
+        ctx.check_hostname = False
+        ctx.verify_mode = ssl.CERT_NONE
+        ctx.minimum_version = max(ctx.minimum_version, ssl.TLSVersion.TLSv1_1)
+        ctx.load_cert_chain(self.cert_file, keyfile=self.key_file)
+        return ctx
+
+    def dump(self, name, data):
+        """The last request and response of each kind, kept in <keys>/debug/:
+        the one record of exactly what went on the wire when a peer refuses."""
+        os.makedirs(self.debug_dir, exist_ok=True)
+        with open(os.path.join(self.debug_dir, name), 'wb') as f:
+            f.write(data)
+
+
+def interface_ipv6(name):
+    """The first IPv6 address on an interface, or None."""
+    import ifaddr
+    for adapter in ifaddr.get_adapters():
+        if adapter.name == name:
+            for ip in adapter.ips:
+                if ip.is_IPv6:
+                    return ipaddress.IPv6Address(ip.ip[0])
+    return None
+
+
+class AirDropBrowser:
+    """Browse `_airdrop._tcp` over IPv6 on one interface.
+
+    Each instance that appears is resolved (SRV, TXT, addresses) and handed to
+    the callback on zeroconf's browser thread; the callback gets None when the
+    resolution times out. Removals and updates are ignored: nothing here acts
+    on them."""
+    def __init__(self, config):
+        from zeroconf import IPVersion, Zeroconf
+        self.ip_addr = interface_ipv6(config.interface)
+        if self.ip_addr is None:
+            raise RuntimeError(f'Interface {config.interface} does not have an IPv6 address')
+        self.zeroconf = Zeroconf(interfaces=[str(self.ip_addr)], ip_version=IPVersion.V6Only)
+        self.browser = None
+
+    def start(self, callback_add):
+        from zeroconf import ServiceBrowser, ServiceStateChange
+
+        def changed(zeroconf, service_type, name, state_change):
+            if state_change is ServiceStateChange.Added:
+                wire.debug('mDNS: %s appeared', name)
+                callback_add(zeroconf.get_service_info(service_type, name))
+
+        self.browser = ServiceBrowser(self.zeroconf, '_airdrop._tcp.local.', handlers=[changed])
+
+    def stop(self):
+        self.browser.cancel()
+        self.zeroconf.close()
+
 
 ap = argparse.ArgumentParser()
 # Optional, because --discover-only asks a peer for its name and sends nothing.
@@ -95,8 +200,12 @@ ap.add_argument('--af-log', default=None,
                      'TLVs in it (address = EUI-64 link-local of the frame source) before browsing mDNS')
 ap.add_argument('--name', default='f0010', help='SenderComputerName shown in the Mac dialog')
 ap.add_argument('--model', default='MacBookPro18,3', help='SenderModelName')
-ap.add_argument('--host', default='f0010-awdl')
-ap.add_argument('--keys', default=os.path.join(pwd.getpwuid(os.getuid()).pw_dir, '.opendrop'))
+# The sender advertises nothing, so it has no use for a host label; kept so
+# existing command lines keep working.
+ap.add_argument('--host', default='f0010-awdl', help='unused by the sender')
+ap.add_argument('--keys', default=os.path.join(pwd.getpwuid(os.getuid()).pw_dir, '.opendrop'),
+                help='directory holding keys/certificate.pem, keys/key.pem and, if there is one, '
+                     'keys/validation_record.cms')
 args = ap.parse_args()
 OP_TIMEOUT = args.op_timeout
 if not args.discover_only and not args.files:
@@ -121,91 +230,24 @@ log = logging.getLogger('send')
 with open(f'/sys/class/net/{args.iface}/address') as f:
     sid = f.read().strip().replace(':', '')
 
-config = AirDropConfig(host_name=args.host, computer_name=args.name,
-                       computer_model=args.model, airdrop_dir=args.keys,
-                       service_id=sid, interface=args.iface, debug=True)
+config = Config(args.keys, computer_name=args.name, computer_model=args.model,
+                service_id=sid, interface=args.iface)
 
 T0 = time.monotonic()
 def t():
     return f'+{time.monotonic() - T0:6.2f}s'
 
 
-def send_ask_modern(self, file_path, is_url=False, icon=None):
-    """OpenDrop's /Ask body predates today's sharingd. A Mac's Ask (captured by
-    our receiver, 2026-09-07) carries TransferID, TransferType, Items, per-file
-    FileSize, a UTI such as public.jpeg, and a ~25 KB icon; an iPhone answered
-    OpenDrop's shape with 200 Discover and then showed no UI for the Ask."""
-    import plistlib, uuid, io, mimetypes
-    from PIL import Image
-    files = [file_path] if isinstance(file_path, str) else list(file_path)
-    uti = {'.jpg': 'public.jpeg', '.jpeg': 'public.jpeg', '.png': 'public.png', '.heic': 'public.heic',
-           '.mov': 'com.apple.quicktime-movie', '.mp4': 'public.mpeg-4', '.pdf': 'com.adobe.pdf',
-           '.txt': 'public.plain-text'}
-    entries = []
-    for f in files:
-        ext = os.path.splitext(f)[1].lower()
-        entries.append({
-            'FileName': os.path.basename(f),
-            'FileType': uti.get(ext, 'public.data'),
-            'FileSize': os.path.getsize(f),
-            'FileBomPath': os.path.join('.', os.path.basename(f)),
-            'FileIsDirectory': False,
-            'ConvertMediaFormats': False,
-        })
-    # One TransferID for Ask and Upload: sharingd sends the same UUID in the Ask
-    # body and the Upload's TransferID header (hume, 093540Z), and our receiver
-    # files the upload under it.
-    self.transfer_id = str(uuid.uuid4()).upper()
-    if args.should_convert:
-        for e in entries:
-            e['ShouldConvertMediaFormats'] = False
-    body = {
-        'TransferID': {'id': self.transfer_id},
-        'TransferType': {'files': {}},
-        'SenderID': self.config.service_id,
-        'BundleID': 'com.apple.finder',
-        'SenderComputerName': self.config.computer_name,
-        'SenderModelName': self.config.computer_model,
-        'Items': [],
-        'Files': entries,
-        'ConvertMediaFormats': False,
-    }
-    if self.config.record_data:
-        body['SenderRecordData'] = self.config.record_data
-    # 09-08: hume's own Ask carries a 3-byte SenderIdentityAuthTag and its log
-    # binds the HTTP sender to a BLE presence ("set the auth tag") right before
-    # HELLO/ASK. First guess for the binding: the 3 bytes after 0x40 in the
-    # sender's BLE AirDrop advert (ble-airdrop-adv.py --tag). --auth-tag sets it.
-    if args.auth_tag:
-        body['SenderIdentityAuthTag'] = bytes.fromhex(args.auth_tag)
-    try:
-        im = Image.open(files[0]); im.thumbnail((240, 240)); buf = io.BytesIO()
-        im.convert('RGB').save(buf, 'JPEG', quality=80); body['FileIcon'] = buf.getvalue()
-    except Exception:
-        pass
-    ok, resp = self.send_POST('/Ask', plistlib.dumps(body, fmt=plistlib.FMT_BINARY))
-    log.info('%s ASK response %d B: %s', t(), len(resp), resp[:120])
-    return ok
-
-
-AirDropClient.send_ask = send_ask_modern
-
-
-def send_discover_modern(self):
-    """A Mac's /Discover request carries DeviceSupportFlags (and its record
-    data); OpenDrop sends an empty plist. 22:13Z: an Apple-shaped Ask after an
-    empty Discover still produced no UI on an iPhone."""
-    import plistlib
-    body = {'DeviceSupportFlags': 111611}
-    if self.config.record_data:
-        body['SenderRecordData'] = self.config.record_data
-    _, resp = self.send_POST('/Discover', plistlib.dumps(body, fmt=plistlib.FMT_BINARY))
-    pl = plistlib.loads(resp)
-    log.info('%s DISCOVER response keys: %s', t(), sorted(pl))
-    return pl.get('ReceiverComputerName')
-
-
-AirDropClient.send_discover = send_discover_modern
+# What every request carries, in this order; a request's own headers replace
+# a value in place (Content-Type) or follow these.
+HEADERS = {
+    'Content-Type': 'application/octet-stream',
+    'Connection': 'keep-alive',
+    'Accept': '*/*',
+    'User-Agent': 'AirDrop/1.0',
+    'Accept-Language': 'en-us',
+    'Accept-Encoding': 'br, gzip, deflate',
+}
 
 
 def dvzip_encode(data, block=1 << 16):
@@ -225,43 +267,132 @@ def dvzip_encode(data, block=1 << 16):
     return bytes(out)
 
 
-def send_upload_modern(self, file_path, is_url=False):
-    """sharingd's Upload, as our receiver saw hume's (093540Z):
-         Content-Type: application/x-dvzip   TotalBytes: <sum of file sizes>
-         TransferID: <the Ask's UUID>        Transfer-Encoding: chunked
-    body = DVZip-framed cpio archive of the files. OpenDrop's default is
-    application/x-cpio + gzip, which sharingd rejects (406 seen 09-07 the other
-    way round). Same TLS connection as the Ask (send_POST reuses http_conn).
-    The archive is written with libarchive directly: OpenDrop's AbsArchiveWrite
-    constructs ArchiveEntry(None, entry_p), which newer python-libarchive-c
-    reads as header_codec=<pointer> and fails on the first pathname."""
-    import io, libarchive
-    if is_url:
-        return True
-    files = [file_path] if isinstance(file_path, str) else list(file_path)
-    stream = io.BytesIO()
-    cwd = os.getcwd()
-    with libarchive.custom_writer(stream.write, 'cpio') as archive:
+class AirDropClient:
+    """One receiver: /Discover, /Ask and /Upload, each a POST on http_conn,
+    which is opened on first use and kept until someone replaces it."""
+    def __init__(self, config, receiver):
+        self.config = config
+        self.receiver_host, self.receiver_port = receiver
+        self.http_conn = None
+        self.transfer_id = None
+
+    def post(self, path, body, headers=None):
+        """POST and read the whole answer: (status is 200, response body).
+
+        Bytes go with a Content-Length; a file-like body makes http.client send
+        it chunked, as sharingd sends /Upload. Both sides of each request are
+        kept in <keys>/debug/, the request before anything is sent."""
+        name = path.strip('/').lower()
+        self.config.dump(f'send_{name}_request.plist',
+                         body.getvalue() if hasattr(body, 'getvalue') else body)
+        wire.debug('POST %s', path)
+        if self.http_conn is None:
+            self.http_conn = HTTPSConnectionAWDL(self.receiver_host, self.receiver_port,
+                                                 interface_name=self.config.interface,
+                                                 context=self.config.get_ssl_context())
+        self.http_conn.request('POST', path, body=body, headers={**HEADERS, **(headers or {})})
+        resp = self.http_conn.getresponse()
+        data = resp.read()
+        self.config.dump(f'send_{name}_response.plist', data)
+        wire.debug('%s answered %d %s', path, resp.status, resp.reason)
+        return resp.status == 200, data
+
+    def send_discover(self):
+        """A Mac's /Discover request carries DeviceSupportFlags (and its record
+        data); OpenDrop sends an empty plist. 22:13Z: an Apple-shaped Ask after an
+        empty Discover still produced no UI on an iPhone."""
+        body = {'DeviceSupportFlags': 111611}
+        if self.config.record_data:
+            body['SenderRecordData'] = self.config.record_data
+        _, resp = self.post('/Discover', plistlib.dumps(body, fmt=plistlib.FMT_BINARY))
+        pl = plistlib.loads(resp)
+        log.info('%s DISCOVER response keys: %s', t(), sorted(pl))
+        return pl.get('ReceiverComputerName')
+
+    def send_ask(self, files):
+        """OpenDrop's /Ask body predates today's sharingd. A Mac's Ask (captured by
+        our receiver, 2026-09-07) carries TransferID, TransferType, Items, per-file
+        FileSize, a UTI such as public.jpeg, and a ~25 KB icon; an iPhone answered
+        OpenDrop's shape with 200 Discover and then showed no UI for the Ask."""
+        from PIL import Image
+        uti = {'.jpg': 'public.jpeg', '.jpeg': 'public.jpeg', '.png': 'public.png', '.heic': 'public.heic',
+               '.mov': 'com.apple.quicktime-movie', '.mp4': 'public.mpeg-4', '.pdf': 'com.adobe.pdf',
+               '.txt': 'public.plain-text'}
+        entries = []
         for f in files:
-            # Store as "./<basename>", as sharingd does, whatever the source path.
-            d, b = os.path.split(os.path.abspath(f))
-            os.chdir(d)
-            try:
-                archive.add_files(b)
-            finally:
-                os.chdir(cwd)
-    body = dvzip_encode(stream.getvalue())
-    headers = {
-        'Content-Type': 'application/x-dvzip',
-        'TotalBytes': str(sum(os.path.getsize(f) for f in files)),
-        'TransferID': getattr(self, 'transfer_id', None) or str(__import__('uuid').uuid4()).upper(),
-    }
-    log.info('%s UPLOAD %d B dvzip (%d B cpio) TransferID %s', t(), len(body), stream.getbuffer().nbytes, headers['TransferID'])
-    ok, _ = self.send_POST('/Upload', io.BytesIO(body), headers=headers)
-    return ok
+            ext = os.path.splitext(f)[1].lower()
+            entries.append({
+                'FileName': os.path.basename(f),
+                'FileType': uti.get(ext, 'public.data'),
+                'FileSize': os.path.getsize(f),
+                'FileBomPath': os.path.join('.', os.path.basename(f)),
+                'FileIsDirectory': False,
+                'ConvertMediaFormats': False,
+            })
+        # One TransferID for Ask and Upload: sharingd sends the same UUID in the Ask
+        # body and the Upload's TransferID header (hume, 093540Z), and our receiver
+        # files the upload under it.
+        self.transfer_id = str(uuid.uuid4()).upper()
+        if args.should_convert:
+            for e in entries:
+                e['ShouldConvertMediaFormats'] = False
+        body = {
+            'TransferID': {'id': self.transfer_id},
+            'TransferType': {'files': {}},
+            'SenderID': self.config.service_id,
+            'BundleID': 'com.apple.finder',
+            'SenderComputerName': self.config.computer_name,
+            'SenderModelName': self.config.computer_model,
+            'Items': [],
+            'Files': entries,
+            'ConvertMediaFormats': False,
+        }
+        if self.config.record_data:
+            body['SenderRecordData'] = self.config.record_data
+        # 09-08: hume's own Ask carries a 3-byte SenderIdentityAuthTag and its log
+        # binds the HTTP sender to a BLE presence ("set the auth tag") right before
+        # HELLO/ASK. First guess for the binding: the 3 bytes after 0x40 in the
+        # sender's BLE AirDrop advert (ble-airdrop-adv.py --tag). --auth-tag sets it.
+        if args.auth_tag:
+            body['SenderIdentityAuthTag'] = bytes.fromhex(args.auth_tag)
+        try:
+            im = Image.open(files[0]); im.thumbnail((240, 240)); buf = io.BytesIO()
+            im.convert('RGB').save(buf, 'JPEG', quality=80); body['FileIcon'] = buf.getvalue()
+        except Exception:
+            pass
+        ok, resp = self.post('/Ask', plistlib.dumps(body, fmt=plistlib.FMT_BINARY))
+        log.info('%s ASK response %d B: %s', t(), len(resp), resp[:120])
+        return ok
 
+    def send_upload(self, files):
+        """sharingd's Upload, as our receiver saw hume's (093540Z):
+             Content-Type: application/x-dvzip   TotalBytes: <sum of file sizes>
+             TransferID: <the Ask's UUID>        Transfer-Encoding: chunked
+        body = DVZip-framed cpio archive of the files. OpenDrop's default is
+        application/x-cpio + gzip, which sharingd rejects (406 seen 09-07 the other
+        way round). Same TLS connection as the Ask (post reuses http_conn)."""
+        import libarchive
+        stream = io.BytesIO()
+        cwd = os.getcwd()
+        with libarchive.custom_writer(stream.write, 'cpio') as archive:
+            for f in files:
+                # Store as "./<basename>", as sharingd does, whatever the source path.
+                d, b = os.path.split(os.path.abspath(f))
+                os.chdir(d)
+                try:
+                    archive.add_files(b)
+                finally:
+                    os.chdir(cwd)
+        body = dvzip_encode(stream.getvalue())
+        headers = {
+            'Content-Type': 'application/x-dvzip',
+            'TotalBytes': str(sum(os.path.getsize(f) for f in files)),
+            'TransferID': self.transfer_id or str(uuid.uuid4()).upper(),
+        }
+        log.info('%s UPLOAD %d B dvzip (%d B cpio) TransferID %s', t(), len(body), stream.getbuffer().nbytes, headers['TransferID'])
+        ok, _ = self.post('/Upload', io.BytesIO(body), headers=headers)
+        return ok
 
-AirDropClient.send_upload = send_upload_modern
 
 found = threading.Event()
 chosen = {}
@@ -286,12 +417,11 @@ def on_add(info):
     if args.to and ':' in args.to and ipaddress.IPv6Address(eui64_linklocal(args.to)) not in [ipaddress.IPv6Address(a.split('%')[0]) for a in addrs]:
         log.info('%s %s at %s is not --to %s; skipping', t(), ident, addrs, args.to)
         return
-    flags = int(props.get('flags', AirDropReceiverFlags.SUPPORTS_DISCOVER_MAYBE))
-    if not flags & AirDropReceiverFlags.SUPPORTS_DISCOVER_MAYBE:
+    flags = int(props.get('flags', SUPPORTS_DISCOVER))
+    if not flags & SUPPORTS_DISCOVER:
         log.info('%s %s: no /Discover support (flags %#x); skipping', t(), ident, flags)
         return
     client = AirDropClient(config, (addrs[0], int(info.port)))
-    client.http_conn = None
     try:
         t1 = time.monotonic()
         name = client.send_discover()
@@ -343,7 +473,6 @@ if args.direct:
     host, _, port = args.direct.rpartition(':')
     host = host.strip('[]')
     client = AirDropClient(config, (host, int(port)))
-    client.http_conn = None
     try:
         t1 = time.monotonic()
         name = client.send_discover()

@@ -91,7 +91,7 @@ With a window open:
 /usr/lib/omdrop/send-to-peer FILE1 FILE2 ...      # several files, as one transfer
 ```
 
-The recipient's prompt shows the `--name` value, `Omarchy` by default. Several files go as one transfer, so the recipient accepts them once. Files must have different names, because the recipient stores each under its name alone.
+The recipient's prompt shows the `--name` value, `Omarchy` by default. Several files go as one transfer, so the recipient accepts them once. Files must have different names, because the recipient stores each under its name alone. `--list` leaves out this machine's own AWDL address, which the firmware's tables can include.
 
 The sender doesn't wait for mDNS. A peer's address is the EUI-64 link-local of its AWDL MAC, and its port comes from the service it advertises. A Mac with no Finder AirDrop window open publishes nothing over mDNS but still listens, so waiting for mDNS would miss it. An iPhone opens its listener only for a few seconds around other AirDrop activity, so `--wait` polls and sends the moment it opens. Opening a share sheet on the phone brings its listener up.
 
@@ -205,7 +205,7 @@ Issues and pull requests are welcome. Before changing a kernel patch, read [CONT
 
 The patches and helpers were developed with AI assistance. They weren't submitted to Asahi Linux, whose [generative AI policy](https://asahilinux.org/llm-policy/) forbids AI-assisted contributions; this repository makes the work available to people who want it.
 
-The kernel patches derive from the Asahi Linux kernel and are licensed GPL-2.0-only, with authorship and `Signed-off-by` lines preserved. The userspace helpers are original work under the same licence, written from published field descriptions (Broadcom's `wlioctl.h`, the Wireshark AWDL dissector, and SEEMOO's papers) and this project's own measurements, not from [owl](https://github.com/seemoo-lab/owl)'s GPLv3 source.
+The kernel patches derive from the Asahi Linux kernel and are licensed GPL-2.0-only, with authorship and `Signed-off-by` lines preserved. The userspace helpers are original work under the same licence, written from published field descriptions (Broadcom's `wlioctl.h`, the Wireshark AWDL dissector, and SEEMOO's papers) and this project's own measurements, not from [owl](https://github.com/seemoo-lab/owl)'s GPLv3 source. The sender, `airdrop-send.py`, used to import [OpenDrop](https://github.com/seemoo-lab/opendrop) (GPLv3); it now makes the same requests with its own code.
 
 ## Trademark
 

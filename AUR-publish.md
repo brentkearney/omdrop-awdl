@@ -18,7 +18,7 @@ The AUR is a git-hosted recipe index — you push a PKGBUILD, not a binary. User
 
  4. Naming. `brcmfmac-awdl-dkms` already follows the -dkms convention. Nothing to change.
 
- 5. Dependency reachability. python-opendrop must exist somewhere users can get it — it's not in the official repos. If it isn't already on the AUR, our package depends on something uninstallable, and that will draw a comment.
+ 5. Dependency reachability. Every dependency must be installable from the official repositories, and now is: the sender's Python modules (`python-libarchive-c`, `python-pillow`, `python-zeroconf`, `python-ifaddr`) are in `extra`. The package no longer needs opendrop, which is only on the AUR.
 
  6. A clean-chroot build before pushing: extra-x86_64-build, or the aarch64 equivalent, to prove nothing depends on this machine's state. Given Asahi and DKMS, this is where surprises live.
 
