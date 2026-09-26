@@ -458,7 +458,10 @@ def _trace(mac, attempt, knocked, t0, rc, err):
         pass
 
 
-def peer_names(macs, port, sender_name, with_wake=True):
+RESCAN_SECONDS = 2.0   # how often a lookup re-reads the peer table for newcomers
+
+
+def peer_names(macs, port, sender_name, with_wake=True, on_result=None, rescan=None):
     """Name every peer at once. Serially this costs seconds per peer, and a
     listing is something a person waits on.
 
@@ -467,13 +470,44 @@ def peer_names(macs, port, sender_name, with_wake=True):
     absolute deadline for the same reason -- it is the advert that is running
     out, not each peer's patience -- so a slow peer cannot push the listing
     past the moment we stop transmitting.
+
+    on_result(mac, name) is called the moment each peer's answer is known, so
+    a caller can show a name seconds after it arrives rather than when the
+    slowest peer gives up, which is the whole lookup's deadline.
+
+    rescan() returns the macs heard now. While the wake is still up it is
+    called every RESCAN_SECONDS and any mac not yet asked is asked in this same
+    lookup: the firmware table holds eight entries and churns, and a device
+    that arrived just after the lookup started otherwise waited for the next
+    one, half a minute later.
     """
+    results = {}
     with contextlib.ExitStack() as stack:
         ready_by = stack.enter_context(wake()) if with_wake else None
-        with concurrent.futures.ThreadPoolExecutor(max_workers=max(1, len(macs))) as pool:
-            futures = {pool.submit(peer_name, m, port, sender_name, ready_by=ready_by): m
-                       for m in macs}
-            return {futures[f]: f.result() for f in concurrent.futures.as_completed(futures)}
+        # Sixteen covers the eight-entry table plus the watcher's registrations.
+        with concurrent.futures.ThreadPoolExecutor(max_workers=16) as pool:
+            def ask(m):
+                return pool.submit(peer_name, m, port, sender_name, ready_by=ready_by)
+            pending = {ask(m): m for m in macs}
+            asked = set(macs)
+            while pending:
+                done, _ = concurrent.futures.wait(
+                    pending, timeout=RESCAN_SECONDS if rescan else None,
+                    return_when=concurrent.futures.FIRST_COMPLETED)
+                for f in done:
+                    m = pending.pop(f)
+                    results[m] = f.result()
+                    if on_result:
+                        on_result(m, results[m])
+                # Newcomers only while we are still transmitting: once the wake
+                # ends there is nothing to wake them with, and a lookup without
+                # one should stay in seconds.
+                if rescan and ready_by is not None and time.monotonic() < ready_by:
+                    for m in rescan():
+                        if m not in asked:
+                            asked.add(m)
+                            pending[ask(m)] = m
+    return results
 
 
 def main():
@@ -512,6 +546,10 @@ def main():
     ap.add_argument("--no-wake", dest="wake", action="store_false",
                     help="do not advertise over BLE while asking; names then "
                          "resolve only for peers already listening")
+    # For a caller drawing names as they arrive: each peer's row is printed
+    # when its answer is known, in that order, instead of all at the end.
+    ap.add_argument("--stream", action="store_true",
+                    help="with --list --names, print each peer as soon as it answers")
     args = ap.parse_args()
 
     try:
@@ -524,11 +562,11 @@ def main():
             print("no devices found: nothing nearby is advertising. "
                   "A window has to be open for the peer watcher to fill this.")
             return 1
-        names = (peer_names([m for m, _ in heard], args.port, args.name, args.wake)
-                 if args.names else {})
-        for mac, rssi in heard:
-            line = f"{mac}  {signal(rssi)}  [{link_local(mac)}%{IFACE}]:{args.port}"
-            if args.names:
+        rssi_of = dict(heard)
+
+        def row(mac, got=None, named=False):
+            line = f"{mac}  {signal(rssi_of.get(mac))}  [{link_local(mac)}%{IFACE}]:{args.port}"
+            if named:
                 # Three outcomes, three words. A blank column would make
                 # "not receiving" and "would not say" look identical, and only
                 # one of them means you cannot send right now.
@@ -539,9 +577,34 @@ def main():
                 # produces this, but so does one mid-restart of its Bonjour
                 # server, and claiming to know which would be inventing a
                 # diagnosis out of a timeout.
-                got = names.get(mac)
                 line += f"  {got if got else '(anonymous)' if got == '' else '(no response)'}"
-            print(line)
+            return line
+
+        if not args.names:
+            for mac, _ in heard:
+                print(row(mac))
+            return 0
+
+        # A table read that fails mid-lookup is not a reason to stop naming
+        # the peers already heard; it just finds no newcomers this time.
+        def rescan():
+            try:
+                now = peers()
+            except HelperFailed:
+                return []
+            for m, r in now:
+                rssi_of.setdefault(m, r)
+            return [m for m, _ in now]
+
+        # --stream prints each row the moment its answer is in. Without it the
+        # whole listing comes at the end, in signal order, as it always has.
+        report = (lambda m, n: print(row(m, n, True), flush=True)) if args.stream else None
+        names = peer_names([m for m, _ in heard], args.port, args.name, args.wake,
+                           on_result=report, rescan=rescan)
+        if not args.stream:
+            order = [m for m, _ in heard] + [m for m in names if m not in dict(heard)]
+            for mac in order:
+                print(row(mac, names.get(mac), True))
         return 0
 
     if not args.files:

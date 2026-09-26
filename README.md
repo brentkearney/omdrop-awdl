@@ -99,6 +99,8 @@ The sender doesn't wait for mDNS. A peer's address is the EUI-64 link-local of i
 
 `send-to-peer --list --names` (or `omdrop peers -n`) asks each peer for its name with a `/Discover` request, because AirDrop advertises no names. A Contacts Only device keeps its AirDrop service shut until it recognizes a nearby sender. So during the lookup, the sender broadcasts a Bluetooth advert carrying this machine's contact hashes, as an Apple device does when its share sheet opens, and stops it when the lookup ends. `--no-wake` skips the advert, and then only devices already listening answer.
 
+While the advert is up, the lookup re-reads the peer table every two seconds and also asks devices that arrive after it started. `--stream` prints each device's row as soon as it answers, rather than the whole listing at the end.
+
 The advert needs an Apple-issued identity, BlueZ, and `python-dbus` and `python-gobject`. Without them, the lookup says so on stderr and names only devices already listening.
 
 In the output, `(no response)` means nothing answered on the AirDrop port. `(anonymous)` means the peer answered but withheld its name, as it does when it doesn't recognize the sender. A lookup can miss a device that is awake, so if a device you expect is unnamed, run it again.
