@@ -1,6 +1,6 @@
 # omdrop-awdl
 
-AWDL for Apple Silicon Macs on Linux: twelve patches to `brcmfmac`, a DKMS package that builds them, and the root-side helpers that drive the result.
+AWDL protocol activation for Apple Silicon Macs on Linux: twelve patches to `brcmfmac`, a DKMS package that builds them, and helpers.
 
 AWDL (Apple Wireless Direct Link) is the link layer AirDrop and AirPlay run over. These patches expose the Wi-Fi firmware's own AWDL implementation as an `awdl0` interface, instead of reimplementing the protocol in userspace.
 
