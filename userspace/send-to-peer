@@ -53,16 +53,16 @@ def identity_dir(home):
 RECORD = os.path.join(identity_dir(os.path.expanduser("~")), "keys", "validation_record.cms")
 AIRDROP_PORT = 8770
 IFACE = "awdl0"
-WAKE_SECONDS = 30      # ceiling; the advert dies with the listing either way
-WAKE_READY = 5.0       # how long to wait for the advertiser to say it registered
+# The advert's ceiling for a name lookup, and the deadline its knocks wait to.
 # Not a sleep. The receiver binds its port in milliseconds; reaching it took
 # 14.8 s in the run that worked, so the knock keeps trying to this deadline
-# instead of guessing how long to wait. Matched to the advert's own ceiling:
-# there is nothing to wait for once we stop transmitting.
-WAKE_WINDOW = float(WAKE_SECONDS)
+# instead of guessing how long to wait. There is nothing to wait for once we
+# stop transmitting. A send waits, and advertises, for its own --wait.
+WAKE_SECONDS = 30
+WAKE_READY = 5.0       # how long to wait for the advertiser to say it registered
 
 
-def _wake_start():
+def _wake_start(seconds=WAKE_SECONDS):
     """Start the advert and wait for BlueZ to accept it, or explain why not.
 
     Returns (proc, note). A note is a redacted one-line reason the wake did
@@ -71,15 +71,18 @@ def _wake_start():
     when it has not, so registration is observed rather than assumed -- a live
     pid proves only that python started, and a D-Bus or identity error would
     otherwise look exactly like a working wake.
+
+    Without an Apple ID record the advertiser sends zero hashes. That wakes a
+    receiver set to Everyone (measured on a Mac, 2026-09-21) and nothing set
+    to Contacts Only; skipping the advert instead meant a machine with only a
+    self-signed identity never woke anything at all.
     """
     if not os.path.exists(ADVERTISER):
         return None, None                      # not installed; nothing to say
-    if not os.path.exists(RECORD):
-        return None, None                      # no Apple identity; nothing to send
     try:
         proc = subprocess.Popen(
-            [sys.executable, ADVERTISER, "--arm", "A", "--hashes-from-record",
-             "--seconds", str(WAKE_SECONDS), "--interval-ms", "100"],
+            [sys.executable, ADVERTISER, "--arm", "A", "--hashes-from-record", RECORD,
+             "--seconds", str(max(1, int(seconds))), "--interval-ms", "100"],
             stdout=subprocess.PIPE, stderr=subprocess.STDOUT, bufsize=0)
     except OSError as e:
         return None, f"wake not started: {e.strerror}"
@@ -149,7 +152,7 @@ def _wake_stop(proc):
 
 
 @contextlib.contextmanager
-def wake():
+def wake(seconds=WAKE_SECONDS, purpose="naming peers that are already listening"):
     """Advertise ourselves over BLE for as long as we are asking peers to talk.
 
     A Contacts Only device keeps its AirDrop server shut until a sender's BLE
@@ -167,10 +170,13 @@ def wake():
     kills this process without unwinding, orphaning a radio that is
     transmitting.
 
-    Silent when there is nothing to run: no Apple identity means no hashes
-    worth sending, and a machine without the advertiser still names a peer
-    something else has woken. A wake that was supposed to work and did not is
-    the opposite case, and says so on stderr.
+    Silent when there is nothing to run: a machine without the advertiser
+    still names a peer something else has woken. A wake that was supposed to
+    work and did not is the opposite case, and says so on stderr, followed by
+    `purpose`: what the caller carries on doing without it.
+
+    Yields the absolute deadline the wake lasts until, or None when no wake of
+    ours is up and there is nothing to wait for.
     """
     proc = None
     previous = signals.getsignal(signals.SIGTERM)
@@ -183,14 +189,10 @@ def wake():
     except ValueError:
         previous = None                        # not the main thread; nothing to restore
     try:
-        proc, note = _wake_start()
+        proc, note = _wake_start(seconds)
         if note:
-            print(f"{note}; naming peers that are already listening",
-                  file=sys.stderr)
-        # The deadline the probes may wait until, absolute and monotonic so it
-        # cannot drift with how long anything else takes. None means no wake of
-        # ours is up, and there is nothing to wait for.
-        yield (time.monotonic() + WAKE_WINDOW) if proc is not None and not note else None
+            print(f"{note}; {purpose}", file=sys.stderr)
+        yield (time.monotonic() + seconds) if proc is not None and not note else None
     finally:
         _wake_stop(proc)
         if previous is not None:
@@ -544,8 +546,8 @@ def main():
     # anyone who wants the listing without the broadcast can have it, and will
     # get names only from devices something else has woken.
     ap.add_argument("--no-wake", dest="wake", action="store_false",
-                    help="do not advertise over BLE while asking; names then "
-                         "resolve only for peers already listening")
+                    help="do not advertise over BLE while asking for names or "
+                         "waiting to send; only peers already listening answer")
     # For a caller drawing names as they arrive: each peer's row is printed
     # when its answer is known, in that order, instead of all at the end.
     ap.add_argument("--stream", action="store_true",
@@ -674,15 +676,25 @@ def main():
     # for seconds around other sharingd work, and was gone again a minute
     # later. Two transfers landed by firing inside that window. A Mac in
     # Everyone mode listens throughout and needs none of this.
+    #
+    # Waiting alone relied on something else waking the phone: the radar's
+    # name lookups do, but they stop when the panel closes, and choosing a file
+    # closes it. So the wait raises the same wake the lookups use, for as long
+    # as it waits, and stops it before the transfer starts.
     if args.wait > 0 and not listening(link_local(mac), args.port):
         print(f"waiting up to {args.wait:.0f}s for {mac} to start listening on "
               f"{args.port}", file=sys.stderr)
-        deadline = time.monotonic() + args.wait
-        while time.monotonic() < deadline:
-            if listening(link_local(mac), args.port):
-                break
-            time.sleep(1.0)
-        else:
+        opened = False
+        with contextlib.ExitStack() as stack:
+            if args.wake:
+                stack.enter_context(wake(args.wait, "waiting without a wake"))
+            deadline = time.monotonic() + args.wait
+            while time.monotonic() < deadline:
+                if listening(link_local(mac), args.port):
+                    opened = True
+                    break
+                time.sleep(1.0)
+        if not opened:
             print(f"{mac} never opened {args.port}; on an iPhone, open a share "
                   f"sheet or receive something to wake sharingd", file=sys.stderr)
             return 3
