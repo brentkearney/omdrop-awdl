@@ -11,6 +11,9 @@ import importlib.util
 import threading
 import time
 import unittest
+import io
+import types
+import unittest.mock
 from pathlib import Path
 
 
@@ -77,6 +80,72 @@ class NameLookupTests(unittest.TestCase):
         names = self.stp.peer_names(["aa"], 8770, "test", with_wake=False,
                                     rescan=lambda: ["aa", "cc"])
         self.assertEqual(names, {"aa": None})
+
+
+class SendWaitTests(unittest.TestCase):
+    """A send that waits for a sleeping peer wakes it while it waits."""
+
+    MAC = "7e:49:49:fe:ea:4e"
+
+    def setUp(self):
+        self.stp = load_sender()
+        self.events = []
+        self.stp.peers = lambda: [(self.MAC, -40)]
+        # The module's own clock and subprocess, so nothing leaks into the
+        # real modules other tests use.
+        self.stp.time = types.SimpleNamespace(
+            monotonic=time.monotonic, sleep=lambda s: None,
+            time=time.time, strftime=time.strftime, gmtime=time.gmtime)
+
+        @contextlib.contextmanager
+        def wake(seconds=30, purpose=""):
+            self.events.append(("wake up", seconds))
+            try:
+                yield time.monotonic() + seconds
+            finally:
+                self.events.append(("wake down",))
+        self.stp.wake = wake
+
+        class Ran:
+            returncode = 0
+
+        def run(cmd, **kw):
+            self.events.append(("send",))
+            return Ran()
+        self.stp.subprocess = types.SimpleNamespace(run=run)
+
+    def main(self, *argv, answers):
+        answers = iter(answers)
+
+        def listening(host, port, timeout=2.0):
+            opened = next(answers, False)
+            self.events.append(("knock", opened))
+            return opened
+        self.stp.listening = listening
+        with unittest.mock.patch("sys.argv", ["send-to-peer", *argv, "file"]):
+            with contextlib.redirect_stderr(io.StringIO()):
+                return self.stp.main()
+
+    def test_the_wake_is_up_while_waiting_and_down_before_the_transfer(self):
+        rc = self.main("--wait", "20", answers=[False, False, True])
+        self.assertEqual(rc, 0)
+        names = [e[0] for e in self.events]
+        self.assertEqual(self.events[1], ("wake up", 20.0))
+        self.assertLess(names.index("wake up"), names.index("knock", 1))
+        self.assertLess(names.index("wake down"), names.index("send"))
+
+    def test_a_peer_that_never_opens_still_stops_the_wake(self):
+        self.stp.time.monotonic = iter(range(0, 10000, 5)).__next__
+        rc = self.main("--wait", "20", answers=[])
+        self.assertEqual(rc, 3)
+        self.assertIn(("wake down",), self.events)
+        self.assertNotIn(("send",), self.events)
+
+    def test_no_wake_is_raised_with_no_wake_or_a_listening_peer(self):
+        self.main("--wait", "20", "--no-wake", answers=[False, True])
+        self.main("--wait", "20", answers=[True])
+        self.assertNotIn("wake up", [e[0] for e in self.events])
+
 
 
 if __name__ == "__main__":
