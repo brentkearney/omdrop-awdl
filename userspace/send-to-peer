@@ -73,9 +73,9 @@ def _wake_start(seconds=WAKE_SECONDS):
     otherwise look exactly like a working wake.
 
     Without an Apple ID record the advertiser sends zero hashes. That wakes a
-    receiver set to Everyone (measured on a Mac, 2026-09-21) and nothing set
-    to Contacts Only; skipping the advert instead meant a machine with only a
-    self-signed identity never woke anything at all.
+    receiver set to Everyone (measured on a Mac, 2026-09-21, and an iPhone,
+    2026-09-28) and nothing set to Contacts Only; skipping the advert instead
+    meant a machine with only a self-signed identity never woke anything at all.
     """
     if not os.path.exists(ADVERTISER):
         return None, None                      # not installed; nothing to say

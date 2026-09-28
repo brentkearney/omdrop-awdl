@@ -103,7 +103,7 @@ While the advert is up, the lookup re-reads the peer table every two seconds and
 
 A send that waits for a device to start listening (`--wait`) broadcasts the same advert for as long as it waits, and stops it before the transfer starts.
 
-The advert needs BlueZ, `python-dbus` and `python-gobject`; without them, the sender says so on stderr and reaches only devices already listening. Without an Apple-issued identity it carries zero hashes, which wake a Mac set to Everyone (not yet tested against an iPhone) but nothing set to Contacts Only.
+The advert needs BlueZ, `python-dbus` and `python-gobject`; without them, the sender says so on stderr and reaches only devices already listening. Without an Apple-issued identity it carries zero hashes, which wake a Mac or an iPhone set to Everyone but nothing set to Contacts Only.
 
 In the output, `(no response)` means nothing answered on the AirDrop port. `(anonymous)` means the peer answered but withheld its name, as it does when it doesn't recognize the sender. A lookup can miss a device that is awake, so if a device you expect is unnamed, run it again.
 
