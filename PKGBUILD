@@ -10,7 +10,7 @@
 
 pkgname=brcmfmac-awdl-dkms
 pkgver=0.6.3
-pkgrel=1
+pkgrel=2
 _asahitag=asahi-7.1.13-3
 pkgdesc="AWDL (AirDrop link layer) support for Apple Broadcom Wi-Fi (BCM4378, BCM4387, BCM4388): DKMS module and root helpers"
 arch=('aarch64')
@@ -21,12 +21,16 @@ license=('GPL-2.0-only')
 # session invoke the one helper that needs root. The sender, airdrop-send.py,
 # draws its /Ask icon with Pillow and packs its /Upload with libarchive;
 # zeroconf and ifaddr are its mDNS browse, used when it runs without --direct.
-depends=('dkms' 'bash' 'python' 'iproute2' 'iputils' 'kmod' 'polkit'
-         'procps-ng' 'util-linux' 'systemd'
+#
+# linux-asahi-headers is a hard dependency, not an optional one. Without it the
+# DKMS hook has nothing to compile against and silently builds nothing, so the
+# stock brcmfmac stays loaded and awdl0 cannot be created
+# (brentkearney/omdrop-plugin#17).
+depends=('dkms' 'linux-asahi-headers' 'bash' 'python' 'iproute2' 'iputils'
+         'kmod' 'polkit' 'procps-ng' 'util-linux' 'systemd'
          'python-libarchive-c' 'python-pillow' 'python-zeroconf' 'python-ifaddr')
 makedepends=()        # prepare() patches with patch(1), which base-devel has
-optdepends=('linux-asahi-headers: build against the Asahi kernel'
-            'networkmanager: keeps awdl0 unmanaged and settles the Wi-Fi MAC before awdl0 is derived from it'
+optdepends=('networkmanager: keeps awdl0 unmanaged and settles the Wi-Fi MAC before awdl0 is derived from it'
             # Naming a peer wakes it with a BLE Continuity advert, so these
             # are what `send-to-peer --list --names` needs to reach a device
             # set to Contacts Only. Still optional: without them the lookup

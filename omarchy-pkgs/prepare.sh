@@ -18,11 +18,11 @@
 # Two differences from ours, both required by the target:
 #
 #   - ${startdir} becomes the unpacked tarball inside ${srcdir}
-#   - the linux-asahi-headers optdepend is dropped: Omarchy's base install
+#   - the linux-asahi-headers dependency is dropped: Omarchy's base install
 #     guarantees matching kernel headers before any DKMS package is installed,
 #     and their PR 454 removed header dependencies from DKMS recipes for that
-#     reason. Anyone building from this repository directly still sees the note
-#     in our own PKGBUILD and README.
+#     reason. Our own PKGBUILD keeps it as a hard dependency, because a build
+#     from this repository has no such guarantee (omdrop-plugin#17).
 #
 # Usage:
 #     omarchy-pkgs/prepare.sh              regenerate the recipe (checksum SKIP)
@@ -99,18 +99,15 @@ if rewired != 1:
     sys.exit(f"expected one patch loop to rewire, found {rewired}")
 
 # Omarchy's base install supplies matching kernel headers before DKMS packages
-# are installed, and its recipes do not name them (their PR 454). Drop that one
-# entry wherever it sits in the array, and re-emit the rest aligned.
-def drop_headers(match):
-    entries = [e for e in re.findall(r"'([^']*)'", match.group(1))
-               if not e.startswith("linux-asahi-headers:")]
-    joined = "\n            ".join(f"'{e}'" for e in entries)
-    return f"optdepends=({joined})"
-
-src, dropped = re.subn(r"optdepends=\((.*?)\)\n", lambda m: drop_headers(m) + "\n",
-                       src, flags=re.S)
+# are installed, and its recipes do not name them (their PR 454). Drop the
+# entry from depends, and the comment explaining why ours carries it.
+src, dropped = re.subn(r"(depends=\('dkms') 'linux-asahi-headers'", r"\1", src)
 if dropped != 1:
-    sys.exit(f"expected one optdepends array to rewrite, found {dropped}")
+    sys.exit(f"expected one linux-asahi-headers dependency to drop, found {dropped}")
+src, dropped = re.subn(r"#\n# linux-asahi-headers is a hard dependency.*?\)\.\n",
+                       "", src, flags=re.S)
+if dropped != 1:
+    sys.exit(f"expected one headers comment to drop, found {dropped}")
 print(src, end="")
 PY
 } > "$out"

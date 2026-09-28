@@ -10,7 +10,7 @@
 
 pkgname=brcmfmac-awdl-dkms
 pkgver=0.6.3
-pkgrel=1
+pkgrel=2
 _asahitag=asahi-7.1.13-3
 pkgdesc="AWDL (AirDrop link layer) support for Apple Broadcom Wi-Fi (BCM4378, BCM4387, BCM4388): DKMS module and root helpers"
 arch=('aarch64')
@@ -21,11 +21,15 @@ license=('GPL-2.0-only')
 # session invoke the one helper that needs root. The sender, airdrop-send.py,
 # draws its /Ask icon with Pillow and packs its /Upload with libarchive;
 # zeroconf and ifaddr are its mDNS browse, used when it runs without --direct.
-depends=('dkms' 'bash' 'python' 'iproute2' 'iputils' 'kmod' 'polkit'
-         'procps-ng' 'util-linux' 'systemd'
+depends=('dkms' 'bash' 'python' 'iproute2' 'iputils'
+         'kmod' 'polkit' 'procps-ng' 'util-linux' 'systemd'
          'python-libarchive-c' 'python-pillow' 'python-zeroconf' 'python-ifaddr')
 makedepends=()        # prepare() patches with patch(1), which base-devel has
 optdepends=('networkmanager: keeps awdl0 unmanaged and settles the Wi-Fi MAC before awdl0 is derived from it'
+            # Naming a peer wakes it with a BLE Continuity advert, so these
+            # are what `send-to-peer --list --names` needs to reach a device
+            # set to Contacts Only. Still optional: without them the lookup
+            # says so and names whatever is already listening.
             'bluez: waking a peer to ask its name, and the opt-in advert'
             'python-dbus: waking a peer to ask its name, and the opt-in advert'
             'python-gobject: waking a peer to ask its name, and the opt-in advert')
