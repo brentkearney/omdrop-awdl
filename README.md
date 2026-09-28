@@ -164,6 +164,7 @@ The patches configure AWDL the firmware already implements, so they only work on
 | MacBook Pro 16-inch (2021), M1 Pro | BCM4387 | `14e4:4433` | Sending and receiving, iPhone and Mac, Everyone and Contacts Only | |
 | MacBook Air (2020), M1 | BCM4378 | `14e4:4425` | Receiving from an iPhone, Everyone | [omdrop-plugin#12](https://github.com/brentkearney/omdrop-plugin/issues/12) |
 | MacBook Pro 16-inch (2023), M2 Pro | BCM4388 | `14e4:4434` | Receiving from an iPhone, Everyone | [#16](https://github.com/brentkearney/omdrop-awdl/issues/16) |
+| MacBook Air 13-inch (2022), M2 | BCM4387 | `14e4:4433` | Receiving from a Mac | [omdrop-plugin#17](https://github.com/brentkearney/omdrop-plugin/issues/17) |
 
 ### Probably works
 
@@ -174,7 +175,6 @@ Same Wi-Fi chip as a Mac above, not yet tested:
 | MacBook Pro 14-inch (2021) | M1 Pro, M1 Max | BCM4387 |
 | MacBook Pro 16-inch (2021) | M1 Max | BCM4387 |
 | Mac Studio (2022) | M1 Max, M1 Ultra | BCM4387 |
-| MacBook Air 13-inch (2022) | M2 | BCM4387 |
 | MacBook Air 15-inch (2023) | M2 | BCM4387 |
 | MacBook Pro 13-inch (2020) | M1 | BCM4378 |
 | Mac mini (2020) | M1 | BCM4378 |
