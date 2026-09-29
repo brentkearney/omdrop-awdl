@@ -57,8 +57,11 @@ If any step fails, revoke the key, report the failure, and use `self-signed`.
 | `source` | always | `1password`, `disk`, or `self-signed` |
 | `fetch_id` | `source=1password` | the cache's `fetch_id` |
 | `hard_expiry` | `source=1password` | the cache's `hard_expiry` |
+| `cache_serial` | optional | the cache key's serial number, in decimal |
 
-A file that is present but missing a required key, has an unknown `source`, or has a malformed value is unparseable.
+A file that is present but missing a required key, has an unknown `source`, or has a malformed value is unparseable. Other keys are ignored; parsing a window, and the vectors, never include `cache_serial`.
+
+`cache_serial` exists for sandboxed readers. A systemd user service with mount-namespace hardening (`ProtectHome=`, `ProtectSystem=`, `PrivateTmp=` and similar) runs in its own user namespace, where `@u` is a different, empty user keyring, so searching for `omdrop:identity` finds nothing. The key is still readable by serial there. A reader that finds nothing by search may read the key with this serial; selection then applies unchanged, including the `fetch_id` match.
 
 ## Selection
 
