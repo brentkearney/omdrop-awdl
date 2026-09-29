@@ -31,11 +31,12 @@ A validation record is presented only with the certificate it belongs to: with `
   ```
 
   - Line 1 is exactly `OMDROP-IDENTITY 1`. Any other first line is malformed; a different number is an unsupported version, also malformed.
-  - Line 2 is a JSON object with exactly these seven keys. `fetch_id` is 32 lowercase hex digits. The three times are integer Unix seconds with `T0 <= T1 <= T2` and `T2 - T0 <= 86400`. `C`, `K`, and `R` are integer byte counts, each at least 1.
-  - The bytes after line 2 total exactly `C + K + R`.
+  - Line 2 is a JSON object with exactly these seven keys. `fetch_id` is 32 lowercase hex digits. The three times are integer Unix seconds with `T0 <= T1 <= T2` and `T2 - T0 <= 86400`; JSON booleans aren't integers. `C`, `K`, and `R` are integer byte counts, each from 1 to 16384.
+  - The bytes after line 2 total exactly `C + K + R`. Trailing bytes are malformed, as are missing ones.
+  - The whole payload is at most 32767 bytes, the kernel's limit for a `user` key.
   - Anything else is malformed.
-- The certificate and key are PEM; the record is DER.
-- A cache whose `hard_expiry` is at or before now is expired and never used.
+- The certificate and key are PEM; the record is DER. Consumers don't parse or verify them; `omdrop` checks them before publishing.
+- "Now" is the wall clock, `time.time()` truncated to whole seconds. A cache whose `hard_expiry` is at or before now is expired and never used.
 
 ### Publishing (`omdrop` only)
 
@@ -117,6 +118,14 @@ Under `flock` on `~/.omdrop/keys/.identity.lock`:
 
 Nothing creates, replaces, or renames `certificate.pem`, `key.pem`, or `validation_record.cms`, except `omdrop identity 1password import`, which deletes them.
 
+## An explicit keys directory
+
+`airdrop-send.py --keys DIR` and the receiver's `--keys DIR` replace `~/.omdrop` for the disk trio and the self-signed pair only: they're read from `DIR/keys/`, and the self-signed pair is created there, under `DIR/keys/.identity.lock`. Settings, the window file, and the cache are unaffected, and selection is unchanged.
+
+## Validation
+
+Consumers check only what selection needs: that files exist, and that a disk key matches its certificate. They don't verify certificate chains, CMS signatures, or account IDs. `omdrop` does that when it imports an identity, adopts one with `use`, fetches one, or opens a window with the disk identity.
+
 ## Running as root
 
 A program running as UID 0 acts for the user named by `PKEXEC_UID`, then `SUDO_UID`; if neither is set, it acts for root itself. For that user:
@@ -124,14 +133,15 @@ A program running as UID 0 acts for the user named by `PKEXEC_UID`, then `SUDO_U
 - Home is the password-database entry, not `$HOME`.
 - Settings are `<home>/.config/omdrop/settings`.
 - The runtime directory is `/run/user/<uid>`.
-- The keyring is that user's user keyring.
+- The keyring is that user's user keyring. Root reads the cache directly if it can. If the read is refused, it reads it from a child process that has dropped to that user's UID and GID. If that fails too, the advertiser reports error `cache-unreadable-as-root`; it never substitutes zero hashes for a window whose source is `1password`.
 
 A program running as root only reads, and never creates the self-signed pair.
 
 ## Debug dumps
 
 - By default, no dumps are written.
-- With `OMDROP_DEBUG=1`, a program writes each Discover and Ask request and response to `$XDG_RUNTIME_DIR/omdrop/debug/<name>.plist`, mode `0600`. In each dictionary, at any depth, a value whose key ends in `RecordData` or `Certificate` is replaced by the string `<redacted N bytes>`, where `N` is the value's length in bytes.
+- With `OMDROP_DEBUG=1`, a program writes each Discover and Ask request and response to `$XDG_RUNTIME_DIR/omdrop/debug/<name>.plist`, mode `0600`, in a `0700` directory, by renaming a temporary file into place. In each dictionary, at any depth, a value whose key ends in `RecordData` or `Certificate` is replaced by the string `<redacted N bytes>`, where `N` is the value's length in bytes. A body that isn't a property list is written as `<opaque N bytes>` instead.
+- `airdrop-send.py --verbose` and `omdrop send --verbose` set `OMDROP_DEBUG=1`.
 - With `OMDROP_DEBUG_SENSITIVE=1`, the same dumps are written without redaction. It implies `OMDROP_DEBUG=1`.
 
 ## Test vectors
