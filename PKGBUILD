@@ -9,7 +9,7 @@
 # AWDL, never the network.
 
 pkgname=brcmfmac-awdl-dkms
-pkgver=0.6.4
+pkgver=0.7.0
 pkgrel=1
 _asahitag=asahi-7.1.13-3
 pkgdesc="AWDL (AirDrop link layer) support for Apple Broadcom Wi-Fi (BCM4378, BCM4387, BCM4388): DKMS module and root helpers"
@@ -27,7 +27,7 @@ license=('GPL-2.0-only')
 # stock brcmfmac stays loaded and awdl0 cannot be created
 # (brentkearney/omdrop-plugin#17).
 depends=('dkms' 'linux-asahi-headers' 'bash' 'python' 'iproute2' 'iputils'
-         'kmod' 'polkit' 'procps-ng' 'util-linux' 'systemd'
+         'kmod' 'polkit' 'procps-ng' 'util-linux' 'systemd' 'keyutils'
          'python-libarchive-c' 'python-pillow' 'python-zeroconf' 'python-ifaddr')
 makedepends=()        # prepare() patches with patch(1), which base-devel has
 optdepends=('networkmanager: keeps awdl0 unmanaged and settles the Wi-Fi MAC before awdl0 is derived from it'
@@ -111,6 +111,7 @@ package() {
   # Imported, never executed: the machine identity and tunables every helper
   # above reads instead of carrying a baked-in MAC or hostname.
   install -Dm644 "${startdir}/userspace/awdl_identity.py" "${lib}/awdl_identity.py"
+  install -Dm644 "${startdir}/userspace/awdl_debug.py" "${lib}/awdl_debug.py"
 
   install -Dm644 "${startdir}/packaging/org.omarchy.omdrop.policy" \
     "${pkgdir}/usr/share/polkit-1/actions/org.omarchy.omdrop.policy"

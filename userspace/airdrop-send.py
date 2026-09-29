@@ -21,15 +21,16 @@ import ipaddress
 import logging
 import os
 import plistlib
-import pwd
 import socket
 import ssl
-import subprocess
 import sys
 import threading
 import time
 import uuid
 from http.client import HTTPSConnection
+
+from awdl_debug import dump_protocol
+from awdl_identity import IdentityError, resolve_identity
 
 # Protocol-level lines (each request and its status, the identity in use), on
 # their own logger so the `send` lines callers parse stay the only ones there.
@@ -70,40 +71,21 @@ class HTTPSConnectionAWDL(HTTPSConnection):
 class Config:
     """Who we are to a receiver, and the TLS identity that says so.
 
-    The identity lives in <keys>/keys/, shared with the receiver
-    (airdrop-serve.py) and laid out as opendrop laid it out, so an existing
-    install keeps its certificate and its Apple ID validation record:
-    certificate.pem, key.pem, and validation_record.cms if there is one."""
+    The shared resolver selects one certificate and its matching record from
+    the active window, disk identity, or separate self-signed pair."""
     def __init__(self, keys, computer_name, computer_model, service_id, interface):
         self.computer_name = computer_name
         self.computer_model = computer_model
         self.service_id = service_id
         self.interface = interface
-        keys = os.path.expanduser(keys)
-        self.key_dir = os.path.join(keys, 'keys')
-        self.debug_dir = os.path.join(keys, 'debug')
-        self.cert_file = os.path.join(self.key_dir, 'certificate.pem')
-        self.key_file = os.path.join(self.key_dir, 'key.pem')
-        if not os.path.exists(self.cert_file) or not os.path.exists(self.key_file):
-            self.create_certificate()
-        record = os.path.join(self.key_dir, 'validation_record.cms')
-        self.record_data = None
-        if os.path.exists(record):
-            with open(record, 'rb') as f:
-                self.record_data = f.read()
+        self.debug_verbose = False
+        self.identity = resolve_identity(keys=keys, computer_name=computer_name)
+        self.record_data = self.identity.record_data
+        if self.record_data is not None:
             wire.debug('Apple ID validation record found (%d B)', len(self.record_data))
         else:
             wire.debug('no Apple ID validation record; sending without one')
 
-    def create_certificate(self):
-        """A self-signed identity, which is all an Everyone-mode peer asks for,
-        with --name as its CN."""
-        wire.info('no certificate in %s; creating a self-signed one', self.key_dir)
-        os.makedirs(self.key_dir, mode=0o700, exist_ok=True)
-        subprocess.run(['openssl', 'req', '-newkey', 'rsa:2048', '-nodes', '-keyout', 'key.pem',
-                        '-x509', '-days', '365', '-out', 'certificate.pem',
-                        '-subj', f'/CN={self.computer_name}'],
-                       cwd=self.key_dir, capture_output=True, check=True)
 
     def get_ssl_context(self):
         """A fresh client context per connection: present our certificate,
@@ -121,15 +103,18 @@ class Config:
         ctx.check_hostname = False
         ctx.verify_mode = ssl.CERT_NONE
         ctx.minimum_version = max(ctx.minimum_version, ssl.TLSVersion.TLSv1_1)
-        ctx.load_cert_chain(self.cert_file, keyfile=self.key_file)
+        try:
+            self.identity.load_cert_chain(ctx)
+        except IdentityError as e:
+            raise SystemExit(f'identity error: {e}') from None
         return ctx
 
     def dump(self, name, data):
-        """The last request and response of each kind, kept in <keys>/debug/:
-        the one record of exactly what went on the wire when a peer refuses."""
-        os.makedirs(self.debug_dir, exist_ok=True)
-        with open(os.path.join(self.debug_dir, name), 'wb') as f:
-            f.write(data)
+        """Write explicitly requested protocol diagnostics without identity data."""
+        try:
+            dump_protocol(name, data, verbose=self.debug_verbose)
+        except (OSError, ValueError) as exc:
+            wire.warning('protocol dump skipped: %s', exc)
 
 
 def interface_ipv6(name):
@@ -173,19 +158,6 @@ class AirDropBrowser:
         self.zeroconf.close()
 
 
-def identity_dir(home):
-    """Where this user's AirDrop identity lives: ~/.omdrop since 0.6.1.
-
-    Omdrop copies an existing ~/.opendrop/keys there once and leaves the
-    original in place. Until that copy exists -- an older plugin, or a sender
-    run before the first window -- keep reading ~/.opendrop, so a sender never
-    creates a fresh self-signed identity beside an Apple ID one.
-    """
-    new = os.path.join(home, '.omdrop')
-    old = os.path.join(home, '.opendrop')
-    if os.path.isdir(os.path.join(new, 'keys')) or not os.path.isdir(os.path.join(old, 'keys')):
-        return new
-    return old
 
 
 ap = argparse.ArgumentParser()
@@ -218,9 +190,11 @@ ap.add_argument('--model', default='MacBookPro18,3', help='SenderModelName')
 # The sender advertises nothing, so it has no use for a host label; kept so
 # existing command lines keep working.
 ap.add_argument('--host', default='f0010-awdl', help='unused by the sender')
-ap.add_argument('--keys', default=identity_dir(pwd.getpwuid(os.getuid()).pw_dir),
-                help='directory holding keys/certificate.pem, keys/key.pem and, if there is one, '
-                     'keys/validation_record.cms')
+ap.add_argument('--verbose', action='store_true',
+                help='write redacted protocol dumps to the user runtime directory')
+ap.add_argument('--keys', default=None,
+                help="identity directory (default: invoking user's passwd home/.omdrop); "
+                     'replaces the disk and self-signed keys location only')
 args = ap.parse_args()
 OP_TIMEOUT = args.op_timeout
 if not args.discover_only and not args.files:
@@ -245,8 +219,12 @@ log = logging.getLogger('send')
 with open(f'/sys/class/net/{args.iface}/address') as f:
     sid = f.read().strip().replace(':', '')
 
-config = Config(args.keys, computer_name=args.name, computer_model=args.model,
-                service_id=sid, interface=args.iface)
+try:
+    config = Config(args.keys, computer_name=args.name, computer_model=args.model,
+                    service_id=sid, interface=args.iface)
+except IdentityError as e:
+    raise SystemExit(f'identity error: {e}') from None
+config.debug_verbose = args.verbose
 
 T0 = time.monotonic()
 def t():
@@ -295,11 +273,9 @@ class AirDropClient:
         """POST and read the whole answer: (status is 200, response body).
 
         Bytes go with a Content-Length; a file-like body makes http.client send
-        it chunked, as sharingd sends /Upload. Both sides of each request are
-        kept in <keys>/debug/, the request before anything is sent."""
+        it chunked, as sharingd sends /Upload. Debug dumps are opt-in."""
         name = path.strip('/').lower()
-        self.config.dump(f'send_{name}_request.plist',
-                         body.getvalue() if hasattr(body, 'getvalue') else body)
+        self.config.dump(f'send_{name}_request.plist', body)
         wire.debug('POST %s', path)
         if self.http_conn is None:
             self.http_conn = HTTPSConnectionAWDL(self.receiver_host, self.receiver_port,

@@ -39,6 +39,8 @@ import dbus.mainloop.glib
 import dbus.service
 from gi.repository import GLib
 
+from awdl_identity import IdentityError, resolve_identity
+
 APPLE = 0x004C
 AD_IFACE = 'org.bluez.LEAdvertisement1'
 ADM_IFACE = 'org.bluez.LEAdvertisingManager1'
@@ -77,46 +79,24 @@ def redact(value):
     slots = h[22:38]
     return h if set(slots) == {'0'} else h[:22] + 'xx' * 8 + h[38:]
 
-def identity_dir(home):
-    """Where this user's AirDrop identity lives: ~/.omdrop since 0.6.1.
-
-    Omdrop copies an existing ~/.opendrop/keys there once and leaves the
-    original in place. Until that copy exists -- an older plugin, or a sender
-    run before the first window -- keep reading ~/.opendrop, so a sender never
-    creates a fresh self-signed identity beside an Apple ID one.
-    """
-    new = os.path.join(home, '.omdrop')
-    old = os.path.join(home, '.opendrop')
-    if os.path.isdir(os.path.join(new, 'keys')) or not os.path.isdir(os.path.join(old, 'keys')):
-        return new
-    return old
-
-
 def default_record():
-    """Where the invoking user's Apple ID validation record lives.
-
-    The window supervisor runs as root through pkexec, so expanding `~` here
-    would look in /root, find nothing, and fall back to zero hashes -- an
-    advert that no Contacts Only device can match, produced silently. pkexec
-    sets PKEXEC_UID and sudo sets SUDO_UID; either names the human whose
-    identity we are advertising.
-    """
-    for var in ('PKEXEC_UID', 'SUDO_UID'):
-        uid = os.environ.get(var)
-        if uid and uid.isdigit() and int(uid) != 0:
-            import pwd
-            try:
-                home = pwd.getpwuid(int(uid)).pw_dir
-            except KeyError:
-                continue
-            return os.path.join(identity_dir(home), 'keys', 'validation_record.cms')
-    return os.path.join(identity_dir(os.path.expanduser('~')), 'keys', 'validation_record.cms')
+    """The disk record used only by the explicit research override."""
+    import pwd
+    uid = os.getuid()
+    if uid == 0:
+        for var in ('PKEXEC_UID', 'SUDO_UID'):
+            value = os.environ.get(var)
+            if value and value.isdigit():
+                uid = int(value)
+                break
+    home = pwd.getpwuid(uid).pw_dir
+    return os.path.join(home, '.omdrop', 'keys', 'validation_record.cms')
 
 
 DEFAULT_RECORD = default_record()
 
 
-def hashes_from_record(path):
+def hashes_from_record(record):
     """The four 2-byte contact hashes, derived from our own Apple ID record.
 
     Zeros mean "no contact match", which only an Everyone-mode receiver
@@ -126,9 +106,8 @@ def hashes_from_record(path):
     identifiers Apple verified for this account, and the advert carries the
     first two bytes of each.
 
-    The signature is not checked: this is our own installed record, read to
-    learn what to say about ourselves. `install-airdrop-identity` is what
-    verifies a record against Apple's root before it is installed.
+    The signature is not checked here: identity publication validates it.
+    Accept bytes so a cached record never needs a plaintext disk copy.
 
     Returns hex, and nothing here ever prints a hash or an identifier: a full
     hash is reversible to a phone number by brute force, and a prefix narrows
@@ -138,14 +117,14 @@ def hashes_from_record(path):
     import subprocess
     proc = subprocess.run(
         ['openssl', 'cms', '-verify', '-noverify', '-inform', 'DER'],
-        input=open(path, 'rb').read(), capture_output=True)
+        input=record, capture_output=True)
     if proc.returncode != 0:
-        raise SystemExit(f'cannot read {path}: {proc.stderr.decode(errors="replace").strip()}')
+        raise SystemExit(f'cannot read validation record: {proc.stderr.decode(errors="replace").strip()}')
     plist = plistlib.loads(proc.stdout)
     emails = [h.lower()[:4] for h in (plist.get('ValidatedEmailHashes') or []) if isinstance(h, str)]
     phones = [h.lower()[:4] for h in (plist.get('ValidatedPhoneHashes') or []) if isinstance(h, str)]
     if not emails and not phones:
-        raise SystemExit(f'{path} validates no identifiers; nothing to advertise')
+        raise SystemExit('validation record validates no identifiers; nothing to advertise')
     # Slot order follows the genuine advert measured off the air on 2026-09-19
     # (results/ble-cap-.../SHAPE.md): slot 0 email, slot 1 phone, slot 2 the
     # account's Apple ID/DSID hash, slot 3 email. The DSID hash is NOT in the
@@ -211,11 +190,12 @@ def main():
     ap.add_argument('--tag', default=None,
                     help='3 bytes hex for arm A bytes 1-3 (the candidate SenderIdentityAuthTag); default random')
     ap.add_argument('--type', default='0x05', help='Continuity TLV type; 0x05 = AirDrop. Anything else is a plumbing test')
-    ap.add_argument('--hashes', default=None, help='four 2-byte contact hashes, hex; default zeros')
+    ap.add_argument('--hashes', default=None,
+                    help='four 2-byte contact hashes, hex; overrides the selected identity')
     ap.add_argument('--hashes-from-record', nargs='?', const=DEFAULT_RECORD, default=None,
                     metavar='RECORD',
-                    help=f'derive the hashes from our own Apple ID validation record (default {DEFAULT_RECORD}). '
-                         'Zeros only wake a receiver set to Everyone.')
+                    help=f'research override: derive hashes from a disk record (default {DEFAULT_RECORD}). '
+                         'Without an override, use the selected identity.')
     ap.add_argument('--seconds', type=int, default=120)
     ap.add_argument('--interval-ms', type=int, default=100)
     ap.add_argument('--broadcast', action='store_true', help='non-connectable (default: connectable, like Apple)')
@@ -226,12 +206,20 @@ def main():
     identifiers = None
     if a.hashes_from_record:
         if os.path.exists(a.hashes_from_record):
-            a.hashes, identifiers = hashes_from_record(a.hashes_from_record)
+            with open(a.hashes_from_record, 'rb') as record:
+                a.hashes, identifiers = hashes_from_record(record.read())
         else:
             # A self-signed machine has no record and cannot do Contacts Only
             # anyway; it can still wake a receiver set to Everyone, so this
             # degrades rather than refusing to advertise.
             stamp(f'no validation record at {a.hashes_from_record}; advertising zero hashes')
+    elif a.hashes is None:
+        try:
+            identity = resolve_identity(create=False)
+        except IdentityError as e:
+            raise SystemExit(f'identity error: {e}') from None
+        if identity.record_data is not None:
+            a.hashes, identifiers = hashes_from_record(identity.record_data)
     a.hashes = a.hashes or '00' * 8
     if a.tag is None:
         a.tag = os.urandom(3).hex()

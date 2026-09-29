@@ -107,6 +107,33 @@ The advert needs BlueZ, `python-dbus` and `python-gobject`; without them, the se
 
 In the output, `(no response)` means nothing answered on the AirDrop port. `(anonymous)` means the peer answered but withheld its name, as it does when it doesn't recognize the sender. A lookup can miss a device that is awake, so if a device you expect is unnamed, run it again.
 
+### Identity storage
+
+The driver follows the identity selected by the Omdrop plugin for the current
+receive window. With the optional 1Password integration, the plugin fetches and
+validates the Apple certificate, private key, and validation record into one
+Linux user-keyring entry. The driver reads that cache through `keyctl`; it never
+invokes 1Password or prompts for authentication.
+
+The plugin controls the cache lifetime and explicit lock/unlock actions.
+Turning receiving off can preserve the cache for the next window. If an active
+window's cached identity is missing, expired, or replaced, driver operations
+report an error instead of silently using a different identity.
+
+Local Apple identities retain `~/.omdrop/keys/certificate.pem`, `key.pem`, and
+`validation_record.cms`. Self-signed identities use `certificate.self-signed.pem`
+and `key.self-signed.pem` and never send a validation record. The driver never
+overwrites the Apple filenames to create a fallback. A standalone sender without
+a plugin window uses the local identity policy; it does not unlock or adopt a
+cached 1Password identity automatically.
+
+The cache is readable by processes with the user's keyring permissions; it is
+not per-application isolation. Loading it into TLS creates userspace copies.
+The sender closes temporary memory-file descriptors after loading TLS and
+disables process core dumps, but cache expiry cannot erase copies held by an
+already-running process. See the [shared identity contract](docs/identity-contract.md)
+for the driver/plugin selection and storage rules.
+
 ### The firmware peer table holds eight entries
 
 The firmware tracks at most eight peers, and a peer without an entry silently loses every frame sent to it. Apple devices change their AWDL MAC every few minutes, and each change takes a new entry. The peer watcher frees slots when a window starts, on `SIGTERM`, and at capacity, where it evicts the peer heard least recently. The device you're talking to stays registered, but in a busy room a quiet device can drop out and reappear. `omdrop-discoverable status` reports `peer_op=degraded` when the table is full of peers that are all audible.
@@ -121,6 +148,16 @@ pkexec /usr/lib/omdrop/omdrop-discoverable trace off
 ```
 
 With tracing on, `tx_status=0x0000` means the peer acknowledged a frame, and `0x0003` means the firmware dropped it before transmission, usually because the peer isn't registered.
+
+Protocol dumps are off by default. Set `OMDROP_DEBUG=1` when running a sender
+(or pass `--verbose` directly to `airdrop-send.py`) to write redacted plists
+under `$XDG_RUNTIME_DIR/omdrop/debug`. Validation records and certificates are
+replaced by their lengths; non-plist bodies are represented only by their size.
+The runtime directory must be private and owned by the invoking user.
+
+`OMDROP_DEBUG_SENSITIVE=1` explicitly enables unredacted dumps for protocol
+development. These can contain identity records and transferred data. Do not
+attach them to bug reports or put them in backups.
 
 ## Configuration
 
