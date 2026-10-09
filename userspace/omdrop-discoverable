@@ -71,6 +71,14 @@ die(){ local rc=$1; shift; log "$*"; exit "$rc"; }
 now(){ date +%s; }
 
 need_root(){ [[ $EUID -eq 0 ]] || die 2 "needs root: pkexec $0 $*"; }
+# Every value that reaches bash arithmetic -- $(( )), (( )), or a -lt/-gt
+# comparison inside [[ ]] -- must pass this first. Arithmetic expands its
+# operands as expressions, and an array subscript is expanded too, so a value
+# such as a[$(cmd)] runs cmd. This script runs as root for any active user
+# through polkit, with any argv they choose; the state files under $RUN are
+# root-owned, but they are checked as well so that no arithmetic here depends
+# on where its input came from.
+is_uint(){ [[ $1 =~ ^[0-9]+$ ]]; }
 
 # --- firmware helpers -------------------------------------------------------
 fwerr(){ dmesg | grep -o "firmware error -\?[0-9]*" | tail -1 | grep -o '\-\?[0-9]*$'; }
@@ -217,7 +225,7 @@ rx_packets(){ cat "/sys/class/net/$IF/statistics/rx_packets" 2>/dev/null || echo
 rx_watch(){
   [[ $(cat "$RUN/rx_proven" 2>/dev/null || echo 0) == 1 ]] && return 0
   local base; base=$(cat "$RUN/rx_base" 2>/dev/null || echo "")
-  [[ -n $base ]] || { rx_packets > "$RUN/rx_base"; return 0; }
+  is_uint "$base" || { rx_packets > "$RUN/rx_base"; return 0; }
   if (( $(rx_packets) > base )); then
     rx_mark 1
     log "receive confirmed: data frames arriving"
@@ -536,6 +544,7 @@ supervise(){
   # $1 was the deadline at spawn; it is deliberately not bound, because the
   # loop below re-reads $RUN/until so a later press can move it.
   local secs=$2 seq=0
+  is_uint "$secs" || die 2 "__supervise: seconds must be a number"
   echo $$ > "$RUN/supervisor"
   trap 'kill_children; printf stopped > "$RUN/reason"; rm -f "$RUN/until"; exit 0' TERM INT
   spawn mdns python3 "$LIB/awdl-mdns-respond.py" --iface "$IF" --port 8771 --flags "$ADV_FLAGS"
@@ -565,7 +574,7 @@ supervise(){
   # 0 is "no expiry", the panel's "Until I turn it off". A missing file means
   # someone tore the window down underneath us, which is a reason to stop.
   local deadline
-  while deadline=$(cat "$RUN/until" 2>/dev/null) && [[ -n $deadline ]] \
+  while deadline=$(cat "$RUN/until" 2>/dev/null) && is_uint "$deadline" \
         && { [[ $deadline == 0 ]] || [[ $(now) -lt $deadline ]]; }; do
     seq=$(( seq + 1 ))
     # Anything that resets the radio -- an infra re-association, an rfkill
@@ -597,6 +606,26 @@ supervise(){
   kill_children
   printf expired > "$RUN/reason"
   rm -f "$RUN/until"
+}
+
+# The supervisor is an internal subcommand, but polkit authorizes the program,
+# not its arguments, so `pkexec omdrop-discoverable __supervise ...` reached it
+# directly and skipped every check `start` makes. Only a supervisor that
+# cmd_start spawned may run: cmd_start writes a fresh random token to a
+# root-only file and passes it in the child's environment. pkexec strips the
+# caller's environment, and an unprivileged caller can neither read the file
+# nor another root process's environment, so a direct call has no token.
+supervise_entry(){
+  need_root __supervise
+  local want got
+  want=${OMDROP_SUPERVISOR_TOKEN:-}
+  unset OMDROP_SUPERVISOR_TOKEN
+  got=$(cat "$RUN/supervisor.token" 2>/dev/null) || got=
+  rm -f "$RUN/supervisor.token"
+  [[ -n $want && $want =~ ^[0-9a-f]{32}$ && $want == "$got" ]] \
+    || die 2 "__supervise is internal; use: $0 start <seconds>"
+  is_uint "$1" || die 2 "__supervise: deadline must be a number"
+  supervise "$1" "$2"
 }
 
 supervisor_pid(){ cat "$RUN/supervisor" 2>/dev/null; }
@@ -760,7 +789,13 @@ cmd_start(){
   # the advertising children must outlive it. The supervisor writes its own pid.
   # 9>&-: the start lock must not be inherited, or the supervisor would hold it
   # for the whole window and every later start would exit 5 instead of extending.
-  setsid "$SELF" __supervise "$until" "$secs" >>"$LOG" 2>&1 9>&- &
+  # The token is what lets supervise_entry tell this spawn from a direct call.
+  local token
+  token=$(od -An -tx1 -N16 /dev/urandom | tr -d ' \n')
+  [[ $token =~ ^[0-9a-f]{32}$ ]] || die 3 "could not read /dev/urandom for the supervisor token"
+  (umask 077 && printf '%s' "$token" > "$RUN/supervisor.token") \
+    || die 3 "could not write the supervisor token"
+  OMDROP_SUPERVISOR_TOKEN=$token setsid "$SELF" __supervise "$until" "$secs" >>"$LOG" 2>&1 9>&- &
   # Wait for the supervisor to claim the window, so `start` never returns 0 on
   # a window that failed to come up.
   local i
@@ -850,7 +885,7 @@ cmd_status(){
     # cost an evening of 5 GHz false negatives. A window is only ok when the
     # address a sender must reach actually exists.
     visible=false; remaining=null; reason=no_awdl0
-  elif supervisor_alive && [[ $until == 0 || ( -n $until && $(now) -lt $until ) ]]; then
+  elif supervisor_alive && is_uint "$until" && [[ $until == 0 || $(now) -lt $until ]]; then
     # The window is live either way -- we ARE advertising and remaining is real
     # -- but the gate may have opened it on transmit alone. Say which, so a
     # panel can distinguish "visible to everyone" from "advertising, nothing
@@ -927,6 +962,7 @@ cmd_diag(){
   need_root diag
   mkdir -p "$RUN"
   local secs=${1:-15} rx0 rx1
+  is_uint "$secs" && (( secs <= 600 )) || die 2 "usage: $0 diag [seconds, at most 600]"
   iovar_get_len awdl_opmode 12 "$RUN/diag.opmode.bin" >/dev/null
   iovar_get_len awdl_chan_seq 64 "$RUN/diag.chanseq.bin" >/dev/null
   iovar_get_len awdl_sync_params 64 "$RUN/diag.sync.bin" >/dev/null
@@ -1025,6 +1061,6 @@ case "${1:-}" in
   diag)   shift; cmd_diag "$@" ;;
   read)   shift; cmd_read "$@" ;;
   trace)  shift; cmd_trace "$@" ;;
-  __supervise) need_root; supervise "$2" "$3" ;;
+  __supervise) shift; supervise_entry "$@" ;;
   *) printf 'usage: %s start <seconds> | stop | status [--json] | peers | diag [seconds] | read <iovar> [len] | trace [on|off]\n' "$0" >&2; exit 2 ;;
 esac
