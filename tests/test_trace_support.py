@@ -1,4 +1,4 @@
-import os
+import random
 import shutil
 import subprocess
 import tempfile
@@ -28,7 +28,7 @@ class TraceSupportTests(unittest.TestCase):
         # The token sits near the start of a large file, followed by a newline:
         # the shape that makes an early-exiting grep SIGPIPE the decompressor.
         raw = self.root / name
-        raw.write_bytes(token + os.urandom(4 << 20))
+        raw.write_bytes(token + random.Random(4387).randbytes(4 << 20))
         if not compress:
             return raw
         subprocess.run(["zstd", "-q", "--rm", str(raw), "-o", f"{raw}.zst"], check=True)
