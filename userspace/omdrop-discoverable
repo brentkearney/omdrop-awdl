@@ -162,29 +162,36 @@ probe_completions(){
 #   loaded (a package install replaces the file; the old module runs until a
 #   reload). The caller keeps the probe, as before this check existed.
 #
-# The whole stream is read (grep -c, not -q): with pipefail, grep -q exiting
-# at the first match kills the decompressor with SIGPIPE and fails the
-# pipeline on exactly the modules that match.
+# Loaded and on-disk modules are matched by build ID: the kernel exposes the
+# loaded module's .note.gnu.build-id verbatim in sysfs, and the same bytes sit
+# in the file. brcmfmac has no MODULE_VERSION, so it has no srcversion to
+# compare. Python reads the whole stream, so no reader exits early and kills
+# the decompressor with SIGPIPE under pipefail; every stage's status is checked.
+NOTE=/sys/module/brcmfmac/notes/.note.gnu.build-id
 trace_support(){
   [[ -e $TRACE ]] && { echo yes; return; }
-  local ko disk loaded out n st pat='brcmfmac: awdl txstatus'
-  ko=$(modinfo -n brcmfmac 2>/dev/null) && [[ -r $ko ]] || { echo unknown; return; }
-  disk=$(modinfo -F srcversion -- "$ko" 2>/dev/null)
-  loaded=$(cat /sys/module/brcmfmac/srcversion 2>/dev/null)
-  [[ -n $disk && $disk == "$loaded" ]] || { echo unknown; return; }
-  # Each branch prints the count, then every stage's exit status on a second
+  local ko out ans st
+  local py='import sys
+note = open(sys.argv[1], "rb").read()
+data = sys.stdin.buffer.read()
+if len(note) < 16 or note not in data:
+    print("unknown")
+else:
+    print("yes" if b"brcmfmac: awdl txstatus" in data else "no")'
+  ko=$(modinfo -n brcmfmac 2>/dev/null) && [[ -r $ko && -r $NOTE ]] || { echo unknown; return; }
+  # Each branch prints the answer, then every stage's exit status on a second
   # line: PIPESTATUS doesn't survive a command substitution.
   case $ko in
-    *.zst) out=$(zstd -dcq -- "$ko" 2>/dev/null | grep -ac "$pat"; echo "${PIPESTATUS[*]}") ;;
-    *.xz)  out=$(xz -dc -- "$ko" 2>/dev/null | grep -ac "$pat"; echo "${PIPESTATUS[*]}") ;;
-    *.gz)  out=$(gzip -dc -- "$ko" 2>/dev/null | grep -ac "$pat"; echo "${PIPESTATUS[*]}") ;;
-    *)     out=$(grep -ac "$pat" -- "$ko" 2>/dev/null; echo "0 $?") ;;
+    *.zst) out=$(zstd -dcq -- "$ko" 2>/dev/null | python3 -c "$py" "$NOTE"; echo "${PIPESTATUS[*]}") ;;
+    *.xz)  out=$(xz -dc -- "$ko" 2>/dev/null | python3 -c "$py" "$NOTE"; echo "${PIPESTATUS[*]}") ;;
+    *.gz)  out=$(gzip -dc -- "$ko" 2>/dev/null | python3 -c "$py" "$NOTE"; echo "${PIPESTATUS[*]}") ;;
+    *)     out=$(python3 -c "$py" "$NOTE" < "$ko" 2>/dev/null; echo "0 $?") ;;
   esac
-  n=${out%%$'\n'*} st=${out##*$'\n'}
-  # The producer must exit 0; grep exits 1 for no match and 2 when it fails.
+  ans=${out%%$'\n'*} st=${out##*$'\n'}
   read -r -a st <<<"$st"
-  (( st[0] == 0 && st[1] <= 1 )) && [[ $n =~ ^[0-9]+$ ]] || { echo unknown; return; }
-  (( n > 0 )) && echo yes || echo no
+  (( ${#st[@]} == 2 && st[0] == 0 && st[1] == 0 )) && [[ $ans == @(yes|no|unknown) ]] \
+    || { echo unknown; return; }
+  echo "$ans"
 }
 
 # Data frames delivered, sampled rather than waited for. The completions probe
