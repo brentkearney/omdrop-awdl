@@ -148,6 +148,45 @@ probe_completions(){
   printf '%s' "$n"
 }
 
+# Whether the loaded brcmfmac can log completions: prints yes, no or unknown.
+#
+# yes: the module has the `awdl_trace` parameter, or it is an older build that
+#   printed every completion unconditionally. Both print the line through
+#   pr_info() with a "brcmfmac: " prefix in the format string itself.
+# no: aurora-silicon/linux at bc1823a897a7 moved the line to brcmf_dbg(), with
+#   no prefix and no parameter. That is no_printk() in a release build, and in
+#   a DEBUG build it prints only with the MSGBUF bit in the `debug` mask, which
+#   nothing here sets. Either way the probe reads 0 on a healthy radio, and the
+#   gate would fail every window as parked.
+# unknown: the module file can't be read, or it is not the module that is
+#   loaded (a package install replaces the file; the old module runs until a
+#   reload). The caller keeps the probe, as before this check existed.
+#
+# The whole stream is read (grep -c, not -q): with pipefail, grep -q exiting
+# at the first match kills the decompressor with SIGPIPE and fails the
+# pipeline on exactly the modules that match.
+trace_support(){
+  [[ -e $TRACE ]] && { echo yes; return; }
+  local ko disk loaded out n st pat='brcmfmac: awdl txstatus'
+  ko=$(modinfo -n brcmfmac 2>/dev/null) && [[ -r $ko ]] || { echo unknown; return; }
+  disk=$(modinfo -F srcversion -- "$ko" 2>/dev/null)
+  loaded=$(cat /sys/module/brcmfmac/srcversion 2>/dev/null)
+  [[ -n $disk && $disk == "$loaded" ]] || { echo unknown; return; }
+  # Each branch prints the count, then every stage's exit status on a second
+  # line: PIPESTATUS doesn't survive a command substitution.
+  case $ko in
+    *.zst) out=$(zstd -dcq -- "$ko" 2>/dev/null | grep -ac "$pat"; echo "${PIPESTATUS[*]}") ;;
+    *.xz)  out=$(xz -dc -- "$ko" 2>/dev/null | grep -ac "$pat"; echo "${PIPESTATUS[*]}") ;;
+    *.gz)  out=$(gzip -dc -- "$ko" 2>/dev/null | grep -ac "$pat"; echo "${PIPESTATUS[*]}") ;;
+    *)     out=$(grep -ac "$pat" -- "$ko" 2>/dev/null; echo "0 $?") ;;
+  esac
+  n=${out%%$'\n'*} st=${out##*$'\n'}
+  # The producer must exit 0; grep exits 1 for no match and 2 when it fails.
+  read -r -a st <<<"$st"
+  (( st[0] == 0 && st[1] <= 1 )) && [[ $n =~ ^[0-9]+$ ]] || { echo unknown; return; }
+  (( n > 0 )) && echo yes || echo no
+}
+
 # Data frames delivered, sampled rather than waited for. The completions probe
 # proves TRANSMIT only, and the receive half parks independently (00:23-00:30Z:
 # 20/20 completions, action frames arriving continuously, zero data frames for
@@ -198,9 +237,16 @@ open_on_transmit(){
   log "gate: $1 transmits; opening with receive unproven until data arrives"
 }
 gate(){
-  local n try
+  local n try ts
   rx_mark 0
   rm -f "$RUN/rx_base"
+  ts=$(trace_support)
+  if [[ $ts == no ]]; then
+    log "gate: this brcmfmac cannot log AWDL tx completions; opening with transmit and receive unproven"
+    rx_packets > "$RUN/rx_base"
+    return 0
+  fi
+  [[ $ts == unknown ]] && log "gate: could not tell whether this brcmfmac logs tx completions; probing anyway"
   n=$(probe_completions) || return 2
   log "gate: probe 20 frames -> $n completions"
   if [[ ${n:-0} -ge 15 ]]; then open_on_transmit probe; return 0; fi
