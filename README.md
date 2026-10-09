@@ -4,7 +4,7 @@ AWDL protocol activation for Apple Silicon Macs on Linux: twelve patches to `brc
 
 AWDL (Apple Wireless Direct Link) is the link layer AirDrop and AirPlay run over. These patches expose the Wi-Fi firmware's own AWDL implementation as an `awdl0` interface, instead of reimplementing the protocol in userspace.
 
-This is the driver half of [Omdrop](https://github.com/brentkearney/omdrop-plugin), AirDrop for [Omarchy M](https://github.com/omacom/omarchy-mac). The functional patches are also proposed for Omarchy's `linux-aurora` kernel in [aurora-silicon/linux#24](https://github.com/aurora-silicon/linux/pull/24).
+This is the driver half of [Omdrop](https://github.com/brentkearney/omdrop-plugin), AirDrop for [Omarchy M](https://github.com/omacom/omarchy-mac). The functional patches are merged into `aurora-wip`, the development branch of Omarchy's `linux-aurora` kernel ([aurora-silicon/linux#24](https://github.com/aurora-silicon/linux/pull/24)). The trace fix is proposed in [#213](https://github.com/aurora-silicon/linux/pull/213). Until a `linux-aurora` release ships both, the Omdrop plugin builds these patches as a DKMS module.
 
 - [Install](#install)
 - [What the package installs](#what-the-package-installs)
@@ -190,7 +190,7 @@ An open window costs 71 mW (95% CI 59.8–82.5), measured on an M1 Pro over 5.6 
 | 0011–0013 | Log, dump and forward AWDL action frames |
 | 0014 | Gate the action-frame log behind `awdl_trace` too |
 
-0001–0008 are the `brcm80211` commits [aurora-silicon/linux](https://github.com/aurora-silicon/linux) `aurora-wip` carries: our series from [#24](https://github.com/aurora-silicon/linux/pull/24), then the maintainers' follow-up from [#183](https://github.com/aurora-silicon/linux/pull/183). They apply here to Asahi's `asahi-7.1.13-3`, which also carries a port-authorization fix in `cfg80211.c` that `aurora-wip` lacks, so the patched tree differs from `aurora-wip` by that fix alone. 0009 restores the tx-completion log that #183 compiled out of release builds, which `omdrop-discoverable` counts to tell a transmitting radio from a parked one; it is proposed upstream. 0010–0014 are instrumentation that stays out of the kernel tree. The action-frame patches show the PSF and MIF frames discovery runs on. Little about this protocol is documented, so start there if you're extending this work.
+0001–0008 are the `brcm80211` commits [aurora-silicon/linux](https://github.com/aurora-silicon/linux) `aurora-wip` carries: our series from [#24](https://github.com/aurora-silicon/linux/pull/24), then the maintainers' follow-up from [#183](https://github.com/aurora-silicon/linux/pull/183). They apply here to Asahi's `asahi-7.1.13-3`, which also carries a port-authorization fix in `cfg80211.c` that `aurora-wip` lacks, so the patched tree differs from `aurora-wip` by that fix alone. 0009 restores the tx-completion log that #183 compiled out of release builds, which `omdrop-discoverable` counts to tell a transmitting radio from a parked one; it is proposed upstream in [#213](https://github.com/aurora-silicon/linux/pull/213). 0010–0014 are instrumentation that stays out of the kernel tree. The action-frame patches show the PSF and MIF frames discovery runs on. Little about this protocol is documented, so start there if you're extending this work.
 
 ## Hardware compatibility
 
