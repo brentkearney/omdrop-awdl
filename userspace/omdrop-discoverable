@@ -164,7 +164,8 @@ probe_completions(){
 #
 # Loaded and on-disk modules are matched by build ID: the kernel exposes the
 # loaded module's .note.gnu.build-id verbatim in sysfs, and the same bytes sit
-# in the file. brcmfmac has no MODULE_VERSION, so it has no srcversion to
+# in the file. brcmfmac has no MODULE_VERSION, and without
+# CONFIG_MODULE_SRCVERSION_ALL the builds tested here expose no srcversion to
 # compare. Python reads the whole stream, so no reader exits early and kills
 # the decompressor with SIGPIPE under pipefail; every stage's status is checked.
 NOTE=/sys/module/brcmfmac/notes/.note.gnu.build-id
