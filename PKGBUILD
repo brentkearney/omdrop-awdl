@@ -3,13 +3,15 @@
 # AWDL support for Apple's Broadcom Wi-Fi (BCM4378, BCM4387, BCM4388): a DKMS module, plus the root-side userspace the
 # omdrop plugin drives it through.
 #
-# The patched brcmfmac installs to updates/dkms/, which depmod prefers over the
-# in-tree module WITHOUT replacing it. That is the whole safety story: if this
-# ever fails to build, the stock driver loads and Wi-Fi keeps working. You lose
-# AWDL, never the network.
+# The patched brcmfmac installs to updates/dkms/, and DKMS sets the kernel's own
+# brcmfmac aside only once that install succeeds, restoring it on removal. That
+# is the safety story: if a kernel update breaks the build, nothing is installed
+# for that kernel, its stock driver loads and Wi-Fi keeps working. You lose AWDL,
+# never the network. On a kernel whose own brcmfmac already has AWDL, dkms.conf
+# skips the build entirely (see dkms.conf.in).
 
 pkgname=brcmfmac-awdl-dkms
-pkgver=0.8.0
+pkgver=0.8.1
 pkgrel=1
 _asahitag=asahi-7.1.13-3
 pkgdesc="AWDL (AirDrop link layer) support for Apple Broadcom Wi-Fi (BCM4378, BCM4387, BCM4388): DKMS module and root helpers"

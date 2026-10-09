@@ -40,7 +40,9 @@ Then enable boot-time setup, which creates `awdl0` without enabling AWDL or adve
 sudo systemctl enable --now awdl0.service
 ```
 
-If a kernel update breaks the DKMS build, the stock `brcmfmac` loads instead: DKMS installs to `updates/dkms/` without removing the in-tree driver. You lose AWDL, not the network.
+If a kernel update breaks the DKMS build, the stock `brcmfmac` loads instead: DKMS sets the kernel's own driver aside only when its build installs, and puts it back when the package is removed. You lose AWDL, not the network.
+
+On a kernel whose own `brcmfmac` already has this AWDL support, DKMS skips the build and that kernel's driver stays in use. The series is merged into `aurora-wip`, so a future `linux-aurora` release will be such a kernel. The check looks for the `awdl_create_flags` module parameter the series adds. The helpers drive the same interface, so they need no change. If that kernel lacks the `awdl_trace` fix ([#213](https://github.com/aurora-silicon/linux/pull/213)), windows open with transmit unproven.
 
 ## What the package installs
 
