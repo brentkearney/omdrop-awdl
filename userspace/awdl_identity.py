@@ -380,14 +380,53 @@ def _read_cache(user, root):
         raise IdentityError('cache-unreadable-as-root' if root else 'cache-unreadable') from None
 
 
-def _disk_matches(certificate, key):
+# Run as the invoking user when this process is root acting for someone else.
+# Every path below is in the user's home or runtime directory, so the user can
+# point it anywhere with a symlink; root following it would read files the
+# user cannot. A child with the user's uid, gid and no supplementary groups
+# reads only what the user could read anyway.
+def _as_user(user, root):
+    if not root or user.pw_uid == 0:
+        return {}
+    return {'user': user.pw_uid, 'group': user.pw_gid, 'extra_groups': []}
+
+
+_READ_CHILD = """
+import sys
+try:
+    with open(sys.argv[1], 'rb') as handle:
+        sys.stdout.buffer.write(handle.read())
+except FileNotFoundError:
+    sys.exit(3)
+except OSError:
+    sys.exit(2)
+"""
+
+
+def _read_user_file(path, user, root):
+    """The file's bytes, read with the invoking user's permissions."""
+    drop = _as_user(user, root)
+    if not drop:
+        return Path(path).read_bytes()
+    result = subprocess.run([sys.executable, '-c', _READ_CHILD, str(path)],
+                            stdin=subprocess.DEVNULL, stdout=subprocess.PIPE,
+                            stderr=subprocess.DEVNULL, **drop)
+    if result.returncode == 3:
+        raise FileNotFoundError(str(path))
+    if result.returncode:
+        raise OSError(f'cannot read {path} as uid {user.pw_uid}')
+    return result.stdout
+
+
+def _disk_matches(certificate, key, user=None, root=False):
+    drop = _as_user(user, root) if user is not None else {}
     try:
         cert = subprocess.run(
             ['openssl', 'x509', '-in', str(certificate), '-pubkey', '-noout'],
-            stdin=subprocess.DEVNULL, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL)
+            stdin=subprocess.DEVNULL, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, **drop)
         private = subprocess.run(
             ['openssl', 'pkey', '-in', str(key), '-passin', 'pass:', '-pubout'],
-            stdin=subprocess.DEVNULL, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL)
+            stdin=subprocess.DEVNULL, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, **drop)
     except OSError:
         raise IdentityError('disk-validation-unavailable') from None
     return cert.returncode == private.returncode == 0 and cert.stdout == private.stdout
@@ -451,13 +490,13 @@ def resolve_identity(*, keys=None, computer_name=None, create=True):
     user, root = _invoking_user()
     settings_path, window_path = _identity_paths(user, root)
     try:
-        settings = parse_settings(settings_path.read_text(encoding='utf-8'))
+        settings = parse_settings(_read_user_file(settings_path, user, root).decode('utf-8'))
     except FileNotFoundError:
         settings = {}
     except (OSError, UnicodeError):
         raise IdentityError('settings-unreadable') from None
     try:
-        window = parse_window(window_path.read_text(encoding='utf-8'))
+        window = parse_window(_read_user_file(window_path, user, root).decode('utf-8'))
     except FileNotFoundError:
         window = None
     except (OSError, UnicodeError):
@@ -478,7 +517,7 @@ def resolve_identity(*, keys=None, computer_name=None, create=True):
     disk.update(record=record.exists(), match=False)
     mode = window['source'] if window else settings.get('identity_source', 'disk')
     if mode == 'disk' and disk['certificate'] and disk['key']:
-        disk['match'] = _disk_matches(certificate, key)
+        disk['match'] = _disk_matches(certificate, key, user, root)
     self_cert, self_key = directory / 'certificate.self-signed.pem', directory / 'key.self-signed.pem'
     choice = select_identity(settings, window, cache, disk,
                              _pair_state(self_cert, self_key), root or not create, now)
@@ -495,7 +534,7 @@ def resolve_identity(*, keys=None, computer_name=None, create=True):
             _create_self_signed(directory, computer_name or socket.gethostname())
         return Identity('self-signed', certificate=self_cert, key=self_key)
     try:
-        record_data = record.read_bytes() if choice['record'] else None
+        record_data = _read_user_file(record, user, root) if choice['record'] else None
     except OSError:
         raise IdentityError('disk-record-unreadable') from None
     return Identity('disk', certificate=certificate, key=key, record_data=record_data)

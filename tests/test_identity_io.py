@@ -164,7 +164,10 @@ class ResolverIOTests(unittest.TestCase):
         self.assertFalse((self.keys / 'certificate.self-signed.pem').exists())
 
     def test_root_never_creates_even_when_create_requested(self):
+        # Simulated root: the reads that would run as the user run here as
+        # this test's own uid, which is what they would get.
         with patch.object(identity, '_invoking_user', return_value=(self.user, True)), \
+                patch.object(identity, '_as_user', return_value={}), \
                 patch.object(identity, '_identity_paths', return_value=(self.config / 'settings', self.runtime / 'window')):
             self.assert_error('self-signed-missing', create=True)
         self.assertEqual(list(self.keys.iterdir()), [])
