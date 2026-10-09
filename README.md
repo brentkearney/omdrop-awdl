@@ -4,7 +4,7 @@ AWDL protocol activation for Apple Silicon Macs on Linux: twelve patches to `brc
 
 AWDL (Apple Wireless Direct Link) is the link layer AirDrop and AirPlay run over. These patches expose the Wi-Fi firmware's own AWDL implementation as an `awdl0` interface, instead of reimplementing the protocol in userspace.
 
-This is the driver half of [Omdrop](https://github.com/brentkearney/omdrop-plugin), AirDrop for [Omarchy M](https://github.com/omacom/omarchy-mac). The functional patches are also proposed for Omarchy's `linux-aurora` kernel in [aurora-silicon/linux#24](https://github.com/aurora-silicon/linux/pull/24).
+This is the driver half of [Omdrop](https://github.com/brentkearney/omdrop-plugin), AirDrop for [Omarchy M](https://github.com/omacom/omarchy-mac). The functional patches are merged into `aurora-wip`, the development branch of Omarchy's `linux-aurora` kernel ([aurora-silicon/linux#24](https://github.com/aurora-silicon/linux/pull/24)). The trace fix is proposed in [#213](https://github.com/aurora-silicon/linux/pull/213). Until a `linux-aurora` release ships both, the Omdrop plugin builds these patches as a DKMS module.
 
 - [Install](#install)
 - [What the package installs](#what-the-package-installs)
@@ -182,13 +182,15 @@ An open window costs 71 mW (95% CI 59.8–82.5), measured on an M1 Pro over 5.6 
 | Patches | Purpose |
 |---|---|
 | 0001–0005 | Create and manage the `awdl0` interface |
-| 0006 | Firmware RAM snapshot vendor op |
-| 0007 | Translate AWDL data frames at the `awdl0` boundary |
-| 0008 | Tolerate txstatus for a freed flowring (fixes a NULL dereference) |
-| 0009–0011 | Log and dump AWDL action frames |
-| 0012 | Gate that instrumentation behind the `awdl_trace` module parameter |
+| 0006 | Translate AWDL data frames at the `awdl0` boundary |
+| 0007 | Tolerate txstatus for a freed flowring (fixes a NULL dereference) |
+| 0008 | Bound AWDL creation, validate the data path, and set the `awdl0` MTU to 1484 |
+| 0009 | Log AWDL tx completions behind the `awdl_trace` module parameter |
+| 0010 | Firmware RAM snapshot vendor op |
+| 0011–0013 | Log, dump and forward AWDL action frames |
+| 0014 | Gate the action-frame log behind `awdl_trace` too |
 
-The kernel pull request carries the functional path: 0001–0005, 0007, and 0008. Patch 0008 is an ordinary bug fix that stands on its own. The instrumentation patches, 0009–0011, show the PSF and MIF frames discovery runs on. Little about this protocol is documented, so start there if you're extending this work.
+0001–0008 are the `brcm80211` commits [aurora-silicon/linux](https://github.com/aurora-silicon/linux) `aurora-wip` carries: our series from [#24](https://github.com/aurora-silicon/linux/pull/24), then the maintainers' follow-up from [#183](https://github.com/aurora-silicon/linux/pull/183). They apply here to Asahi's `asahi-7.1.13-3`, which also carries a port-authorization fix in `cfg80211.c` that `aurora-wip` lacks, so the patched tree differs from `aurora-wip` by that fix alone. 0009 restores the tx-completion log that #183 compiled out of release builds, which `omdrop-discoverable` counts to tell a transmitting radio from a parked one; it is proposed upstream in [#213](https://github.com/aurora-silicon/linux/pull/213). 0010–0014 are instrumentation that stays out of the kernel tree. The action-frame patches show the PSF and MIF frames discovery runs on. Little about this protocol is documented, so start there if you're extending this work.
 
 ## Hardware compatibility
 
@@ -233,7 +235,7 @@ Tried it on another Mac? [Send a hardware report](https://github.com/brentkearne
 
 The patches apply to `asahi-7.1.13-3` (commit `94fb2334`), the tree vendored in `kernel/`, and touch fourteen files, all in `drivers/net/wireless/broadcom/brcm80211/brcmfmac/`. The pin is deliberate, so a rebase conflict shows up at build time rather than at runtime. [kernel/PROVENANCE.md](kernel/PROVENANCE.md) has the re-vendoring steps, and `tests/check-patch-drift` checks whether the patches apply to a newer tag.
 
-The module is built with debug logging because the data-path check counts per-frame `awdl txstatus` lines to tell a stalled radio from a working one.
+The data-path check counts per-frame `awdl txstatus` lines. The module logs them only while its `awdl_trace` parameter is set, and `omdrop-discoverable` sets it for the few seconds the check runs. The module is still built with `DEBUG`, which the firmware RAM snapshot (0010) and the debugfs files need.
 
 Issues and pull requests are welcome. Before changing a kernel patch, read [CONTRIBUTING.md](CONTRIBUTING.md): the patches are stored as `git format-patch` files, so sending commits, not edited patch files, keeps your authorship on the commit that goes upstream.
 
