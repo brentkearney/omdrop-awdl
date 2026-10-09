@@ -9,10 +9,10 @@
 # out-of-tree build, DKMS installs nothing, the in-tree brcmfmac loads, and the
 # machine still has Wi-Fi. It loses AWDL, not the network.
 #
-# CONFIG_BRCMDBG + -DDEBUG are not optional here: the data-path gate in
-# awdl-discoverable judges the firmware by the per-frame `awdl txstatus` lines
-# the debug build logs. A non-debug build silently removes the only oracle that
-# distinguishes a parked radio from a working one.
+# CONFIG_BRCMDBG + -DDEBUG build debug.o, which the firmware RAM snapshot
+# vendor op (0010) and the debugfs files need. The per-frame `awdl txstatus`
+# lines the data-path gate in omdrop-discoverable counts no longer depend on
+# them: 0009 prints those through pr_info() while awdl_trace is set.
 
 PACKAGE_NAME="brcmfmac-awdl"
 PACKAGE_VERSION="@VERSION@"
