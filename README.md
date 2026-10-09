@@ -182,13 +182,15 @@ An open window costs 71 mW (95% CI 59.8–82.5), measured on an M1 Pro over 5.6 
 | Patches | Purpose |
 |---|---|
 | 0001–0005 | Create and manage the `awdl0` interface |
-| 0006 | Firmware RAM snapshot vendor op |
-| 0007 | Translate AWDL data frames at the `awdl0` boundary |
-| 0008 | Tolerate txstatus for a freed flowring (fixes a NULL dereference) |
-| 0009–0011 | Log and dump AWDL action frames |
-| 0012 | Gate that instrumentation behind the `awdl_trace` module parameter |
+| 0006 | Translate AWDL data frames at the `awdl0` boundary |
+| 0007 | Tolerate txstatus for a freed flowring (fixes a NULL dereference) |
+| 0008 | Bound AWDL creation, validate the data path, and set the `awdl0` MTU to 1484 |
+| 0009 | Log AWDL tx completions behind the `awdl_trace` module parameter |
+| 0010 | Firmware RAM snapshot vendor op |
+| 0011–0013 | Log, dump and forward AWDL action frames |
+| 0014 | Gate the action-frame log behind `awdl_trace` too |
 
-The kernel pull request carries the functional path: 0001–0005, 0007, and 0008. Patch 0008 is an ordinary bug fix that stands on its own. The instrumentation patches, 0009–0011, show the PSF and MIF frames discovery runs on. Little about this protocol is documented, so start there if you're extending this work.
+0001–0008 are exactly what [aurora-silicon/linux](https://github.com/aurora-silicon/linux) `aurora-wip` carries: our series from [#24](https://github.com/aurora-silicon/linux/pull/24), then the maintainers' follow-up from [#183](https://github.com/aurora-silicon/linux/pull/183). 0009 restores the tx-completion log that #183 compiled out of release builds, which `omdrop-discoverable` counts to tell a transmitting radio from a parked one; it is proposed upstream. 0010–0014 are instrumentation that stays out of the kernel tree. The action-frame patches show the PSF and MIF frames discovery runs on. Little about this protocol is documented, so start there if you're extending this work.
 
 ## Hardware compatibility
 
