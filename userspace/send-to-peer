@@ -12,6 +12,7 @@ discovery protocol.
   tools/send-to-peer --list                 # what can we hear, and where
   tools/send-to-peer FILE                   # the only peer, or --mac to choose
   tools/send-to-peer --mac e2:9d:.. FILE
+  tools/send-to-peer --mac hume --url https://example.com/   # a link, opened there
   tools/send-to-peer --print FILE           # show the command, send nothing
 
 Peers come from `awdl-discoverable peers`, which needs root, so this runs it
@@ -501,6 +502,9 @@ def main():
                                  formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("files", nargs="*", metavar="file",
                     help="files to send, as one transfer the peer accepts once")
+    ap.add_argument("--url", action="append", default=[], metavar="URL",
+                    help="send this http(s) link instead of files; the peer opens it "
+                         "in its browser. Repeat for several")
     ap.add_argument("--mac", metavar="NAME|ADDRESS",
                     help="who to send to: a peer name, or part of its address. "
                          "Default is the only device heard")
@@ -593,8 +597,10 @@ def main():
                 print(row(mac, names.get(mac), True))
         return 0
 
-    if not args.files:
-        ap.error("a file is required unless --list")
+    if not args.files and not args.url:
+        ap.error("a file or --url is required unless --list")
+    if args.files and args.url:
+        ap.error("send links and files separately: a transfer carries one or the other")
     if args.mac:
         want = args.mac.lower()
         known = [m for m, _ in heard]
@@ -650,7 +656,8 @@ def main():
     target = f"[{link_local(mac)}%{IFACE}]:{args.port}"
     # "--" so a file whose name begins with a dash is a file, not an option.
     cmd = [sys.executable, SENDER, "--direct", target,
-           "--op-timeout", str(args.op_timeout), "--name", args.name, "--", *args.files]
+           "--op-timeout", str(args.op_timeout), "--name", args.name,
+           *(a for u in args.url for a in ("--url", u)), "--", *args.files]
     if args.show:
         print(" ".join(cmd))
         return 0
@@ -683,7 +690,8 @@ def main():
                   f"sheet or receive something to wake sharingd", file=sys.stderr)
             return 3
 
-    what = args.files[0] if len(args.files) == 1 else f"{len(args.files)} files"
+    items = args.url or args.files
+    what = items[0] if len(items) == 1 else (f"{len(items)} links" if args.url else f"{len(items)} files")
     print(f"sending {what} to {mac} at {target}", file=sys.stderr)
     return subprocess.run(cmd).returncode
 
