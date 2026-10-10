@@ -55,6 +55,45 @@ ADV_INTERVAL=6
 # sharingd's removeInvalidNodes: still considers us a valid node.
 ADV_FLAGS=${AWDL_ADV_FLAGS:-137}
 
+# Data frames delivered, sampled rather than waited for. The completions probe
+# proves TRANSMIT only, and the receive half parks independently (00:23-00:30Z:
+# 20/20 completions, action frames arriving continuously, zero data frames for
+# seven minutes, and no peer could see us).
+#
+# This used to be a 15 s wait inside the gate, and it cost every single start
+# those 15 s: in an empty room the sample cannot succeed, because no data frame
+# exists until a sender has already found us and connected. The window opened
+# UNPROVEN anyway. So the gate no longer waits; the supervisor samples the same
+# counter every interval and marks the window proven the moment frames arrive.
+#
+# Note what this counter can and cannot see: action frames -- the peer's PSFs
+# and MIFs, which is what discovery actually runs on -- never increment it.
+# Silence is weak evidence; check `diag` afrx and the peer table before
+# believing a radio is deaf.
+rx_packets(){ cat "/sys/class/net/$IF/statistics/rx_packets" 2>/dev/null || echo 0; }
+
+# Called once per supervision interval. Cheap: two file reads until the window
+# is proven, and nothing at all afterwards.
+rx_watch(){
+  [[ $(cat "$RUN/rx_proven" 2>/dev/null || echo 0) == 1 ]] && return 0
+  local base; base=$(cat "$RUN/rx_base" 2>/dev/null || echo "")
+  is_uint "$base" || { rx_packets > "$RUN/rx_base"; return 0; }
+  if (( $(rx_packets) > base )); then
+    rx_mark 1
+    log "receive confirmed: data frames arriving"
+  fi
+  return 0
+}
+
+rx_mark(){ printf '%s' "$1" > "$RUN/rx_proven"; }
+
+# The window's state, as the moved radio code reports it (omdrop-broadcom.sh,
+# "the radio backend hooks"): why a start failed, and the receive proof's reset
+# and baseline, taken where the gate decides the radio transmits.
+set_reason(){ printf '%s' "$1" > "$RUN/reason"; }
+rx_reset(){ rx_mark 0; rm -f "$RUN/rx_base"; }
+rx_baseline(){ rx_packets > "$RUN/rx_base"; }
+
 # --- children ---------------------------------------------------------------
 # Everything started here is recorded in $RUN/pids and killed by stop/expiry.
 # airdrop-serve.py is deliberately NOT in this set: the receiver is not ours.
@@ -135,20 +174,7 @@ supervise(){
   while deadline=$(cat "$RUN/until" 2>/dev/null) && is_uint "$deadline" \
         && { [[ $deadline == 0 ]] || [[ $(now) -lt $deadline ]]; }; do
     seq=$(( seq + 1 ))
-    # Anything that resets the radio -- an infra re-association, an rfkill
-    # toggle, a firmware reset -- drops awdl0 while the window is still open,
-    # and the frames below then leave on an interface nothing can bind to
-    # (08:26:12Z: status ok, receiver activating, awdl0 DOWN). Re-assert it
-    # every interval: `ip link set up` on an already-up link is a no-op, so
-    # this costs nothing when the link is healthy and restores it when it
-    # is not.
-    if ! ip -6 addr show dev "$IF" scope link 2>/dev/null | grep -q inet6; then
-      log "awdl0 lost its link-local mid-window -- re-asserting the link"
-      ip link set "$IF" up 2>/dev/null
-      ip link set "$IF" promisc on 2>/dev/null
-      ip link set "$IF" allmulticast on 2>/dev/null
-    fi
-    track_election
+    radio_tick
     # The gate opens on transmit alone; this is where the receive half earns
     # its claim, without any start paying for the measurement.
     rx_watch

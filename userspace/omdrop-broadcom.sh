@@ -178,34 +178,10 @@ else:
   echo "$ans"
 }
 
-# Data frames delivered, sampled rather than waited for. The completions probe
-# proves TRANSMIT only, and the receive half parks independently (00:23-00:30Z:
-# 20/20 completions, action frames arriving continuously, zero data frames for
-# seven minutes, and no peer could see us).
-#
-# This used to be a 15 s wait inside the gate, and it cost every single start
-# those 15 s: in an empty room the sample cannot succeed, because no data frame
-# exists until a sender has already found us and connected. The window opened
-# UNPROVEN anyway. So the gate no longer waits; the supervisor samples the same
-# counter every interval and marks the window proven the moment frames arrive.
-#
-# Note what this counter can and cannot see: action frames -- the peer's PSFs
-# and MIFs, which is what discovery actually runs on -- never increment it.
-# Silence is weak evidence; check `diag` afrx and the peer table before
-# believing a radio is deaf.
-rx_packets(){ cat "/sys/class/net/$IF/statistics/rx_packets" 2>/dev/null || echo 0; }
-
-# Called once per supervision interval. Cheap: two file reads until the window
-# is proven, and nothing at all afterwards.
-rx_watch(){
-  [[ $(cat "$RUN/rx_proven" 2>/dev/null || echo 0) == 1 ]] && return 0
-  local base; base=$(cat "$RUN/rx_base" 2>/dev/null || echo "")
-  is_uint "$base" || { rx_packets > "$RUN/rx_base"; return 0; }
-  if (( $(rx_packets) > base )); then
-    rx_mark 1
-    log "receive confirmed: data frames arriving"
-  fi
-  return 0
+# Every exit that opens a window starts the receive sample from here.
+open_on_transmit(){
+  rx_baseline
+  log "gate: $1 transmits; opening with receive unproven until data arrives"
 }
 
 # Returns 0 when the path TRANSMITS. That is the whole question the gate can
@@ -220,21 +196,13 @@ rx_watch(){
 #
 # Retoggles awdl=0/1 only while NO template is loaded: awdl=0 with awdl_payload
 # set hung the firmware (023513Z), and that dead end needs a module reload.
-rx_mark(){ printf '%s' "$1" > "$RUN/rx_proven"; }
-
-# Every exit that opens a window starts the receive sample from here.
-open_on_transmit(){
-  rx_packets > "$RUN/rx_base"
-  log "gate: $1 transmits; opening with receive unproven until data arrives"
-}
 gate(){
   local n try ts
-  rx_mark 0
-  rm -f "$RUN/rx_base"
+  rx_reset
   ts=$(trace_support)
   if [[ $ts == no ]]; then
     log "gate: this brcmfmac cannot log AWDL tx completions; opening with transmit and receive unproven"
-    rx_packets > "$RUN/rx_base"
+    rx_baseline
     return 0
   fi
   [[ $ts == unknown ]] && log "gate: could not tell whether this brcmfmac logs tx completions; probing anyway"
@@ -505,8 +473,9 @@ nudge_peers(){
 
 # radio_up: everything `start` does to the radio before it claims a window --
 # rebuild a missing awdl0, release it from NetworkManager, run the gate, and
-# wait for the link-local. Moved unchanged out of cmd_start; exits through die
-# with 4 (no awdl0) or 3 (parked), and writes $RUN/reason before it does.
+# wait for the link-local. Moved unchanged out of cmd_start, except that the
+# window's reason goes through set_reason; exits through die with 4 (no awdl0)
+# or 3 (parked).
 radio_up(){
   # awdl0 goes away for two very different reasons, and they used to print the
   # same sentence: "the AWDL driver is not loaded".
@@ -524,7 +493,7 @@ radio_up(){
   fi
 
   if ! awdl0_ready; then
-    printf no_awdl0 > "$RUN/reason"
+    set_reason no_awdl0
     # No paths, no iovar names: this is read by someone holding a laptop.
     if driver_loaded; then
       die 4 "AirDrop's radio interface could not be started. Turning Wi-Fi off and back on usually clears this; a restart always does."
@@ -542,10 +511,10 @@ radio_up(){
   gate; GATE_RC=$?
   case "$GATE_RC" in
     0) : ;;
-    2) printf parked > "$RUN/reason"
+    2) set_reason parked
        log "gate: data-path probe inconclusive; firmware state unclassified"
        die 3 "AirDrop's radio did not answer a test. Try again in a moment." ;;
-    *) printf parked > "$RUN/reason"
+    *) set_reason parked
        # Two different dead ends, and telling the user to "just retry" in the
        # second one is a lie: a retry five times over twelve minutes got a
        # byte-identical failure each time. When a template is loaded the gate
@@ -581,12 +550,31 @@ radio_up(){
     sleep 0.5
   done
   if ! ip -6 addr show dev "$IF" scope link 2>/dev/null | grep -q inet6; then
-    printf no_awdl0 > "$RUN/reason"
+    set_reason no_awdl0
     if [[ $(nm_state) != '' && $(nm_state) != *'(unmanaged)'* ]]; then
       die 4 "awdl0 has no link-local because NetworkManager is managing it ($(nm_state)). Run: sudo nmcli general reload conf, then try again"
     fi
     die 4 "awdl0 has no link-local 15 s after the gate -- the data path is up but nothing can bind to it"
   fi
+}
+
+# radio_tick: the radio's share of every supervision interval. Moved unchanged
+# out of the supervisor loop.
+radio_tick(){
+  # Anything that resets the radio -- an infra re-association, an rfkill
+  # toggle, a firmware reset -- drops awdl0 while the window is still open,
+  # and the frames below then leave on an interface nothing can bind to
+  # (08:26:12Z: status ok, receiver activating, awdl0 DOWN). Re-assert it
+  # every interval: `ip link set up` on an already-up link is a no-op, so
+  # this costs nothing when the link is healthy and restores it when it
+  # is not.
+  if ! ip -6 addr show dev "$IF" scope link 2>/dev/null | grep -q inet6; then
+    log "awdl0 lost its link-local mid-window -- re-asserting the link"
+    ip link set "$IF" up 2>/dev/null
+    ip link set "$IF" promisc on 2>/dev/null
+    ip link set "$IF" allmulticast on 2>/dev/null
+  fi
+  track_election
 }
 
 # peers: the firmware's own view of who is on air -- address, RSSI, self
@@ -731,4 +719,21 @@ cmd_trace(){
   esac
   echo "awdl_trace=$(cat "$TRACE")"
   exit 0
+}
+
+# --- the radio backend hooks ------------------------------------------------
+# omdrop-discoverable owns the window's state files, and these are where the
+# moved code touches them: the reason a start failed, and the receive proof's
+# reset and baseline. It defines all three. Under omdrop-core the hooks run
+# with core owning those files (docs/backend-contract.md, "Run directory"), so
+# hook_mode makes them no-ops.
+#
+# hook_mode: every hook calls it right after sourcing this file. Core copies a
+# hook's stderr into $RUN/log with the timestamp kept, so a hook logs to stderr
+# only; appending to the file as well would log every line twice.
+hook_mode(){
+  log(){ printf '%s\n' "$(date -u +%H:%M:%SZ) $*" >&2; }
+  set_reason(){ :; }
+  rx_reset(){ :; }
+  rx_baseline(){ :; }
 }
