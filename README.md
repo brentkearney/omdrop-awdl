@@ -1,6 +1,6 @@
 # omdrop-awdl
 
-AWDL protocol activation for Apple Silicon Macs on Linux: twelve patches to `brcmfmac`, a DKMS package that builds them, and helpers.
+AWDL protocol activation for Apple Silicon Macs on Linux: fourteen patches to `brcmfmac`, a DKMS package that builds them, and helpers.
 
 AWDL (Apple Wireless Direct Link) is the link layer AirDrop and AirPlay run over. These patches expose the Wi-Fi firmware's own AWDL implementation as an `awdl0` interface, instead of reimplementing the protocol in userspace.
 
@@ -42,7 +42,10 @@ sudo systemctl enable --now awdl0.service
 
 If a kernel update breaks the DKMS build, the stock `brcmfmac` loads instead: DKMS sets the kernel's own driver aside only when its build installs, and puts it back when the package is removed. You lose AWDL, not the network.
 
-On a kernel whose own `brcmfmac` already has this AWDL support, DKMS skips the build and that kernel's driver stays in use. The series is merged into `aurora-wip`, so a future `linux-aurora` release will be such a kernel. The check looks for the `awdl_create_flags` module parameter the series adds. The helpers drive the same interface, so they need no change. If that kernel lacks the `awdl_trace` fix ([#213](https://github.com/aurora-silicon/linux/pull/213)), windows open with transmit unproven.
+On a kernel whose own `brcmfmac` already has this AWDL support, DKMS skips the build and that kernel's driver stays in use. The series is merged into `aurora-wip`, so a `linux-aurora` built from a revision that carries it will be such a kernel. The check looks only for the `awdl_create_flags` module parameter, which 0004 adds. A kernel built from `aurora-wip` as of #183 carries 0001–0008 with the same patch IDs and drives the interface the helpers use, so sending, receiving and naming peers don't need this package's module there. It lacks the patches that aren't upstream:
+
+- **0009, the `awdl_trace` fix** ([#213](https://github.com/aurora-silicon/linux/pull/213)): windows open with transmit and receive unproven, so a radio that has stopped transmitting isn't caught before the window opens. Receive is still confirmed once data frames arrive.
+- **0010–0014, instrumentation:** the firmware RAM snapshot (`brcm_iovar.py awdl-if fwdump`), and the action-frame forwarding that `awdl-resolve` and `airdrop-send.py --af-log` read.
 
 ## What the package installs
 
@@ -57,7 +60,7 @@ On a kernel whose own `brcmfmac` already has this AWDL support, DKMS skips the b
 | `/usr/lib/omdrop/*.py` | Helpers for the tools above |
 | `/usr/share/polkit-1/actions/org.omarchy.omdrop.policy` | Lets a local desktop session run `omdrop-discoverable` without a password |
 | `/usr/lib/systemd/system/awdl0.service` | Boot-time `awdl0` setup; not enabled by the install |
-| `/usr/lib/modprobe.d/brcmfmac-awdl.conf` | `debug=0x1000`, the log lines the data-path check counts |
+| `/usr/lib/modprobe.d/brcmfmac-awdl.conf` | `debug=0x1000`, the firmware-interface bit of the debug mask; the data-path check doesn't depend on it |
 | `/usr/lib/NetworkManager/conf.d/99-awdl-unmanaged.conf` | Keeps NetworkManager off `awdl0` |
 | `/usr/share/doc/brcmfmac-awdl-dkms/` | This README, and an optional `10-wld0.link` the package doesn't activate |
 
@@ -195,7 +198,7 @@ An open window costs 71 mW (95% CI 59.8–82.5), measured on an M1 Pro over 5.6 
 | 0011–0013 | Log, dump and forward AWDL action frames |
 | 0014 | Gate the action-frame log behind `awdl_trace` too |
 
-0001–0008 are the `brcm80211` commits [aurora-silicon/linux](https://github.com/aurora-silicon/linux) `aurora-wip` carries: our series from [#24](https://github.com/aurora-silicon/linux/pull/24), then the maintainers' follow-up from [#183](https://github.com/aurora-silicon/linux/pull/183). They apply here to Asahi's `asahi-7.1.13-3`, which also carries a port-authorization fix in `cfg80211.c` that `aurora-wip` lacks, so the patched tree differs from `aurora-wip` by that fix alone. 0009 restores the tx-completion log that #183 compiled out of release builds, which `omdrop-discoverable` counts to tell a transmitting radio from a parked one; it is proposed upstream in [#213](https://github.com/aurora-silicon/linux/pull/213). 0010–0014 are instrumentation that stays out of the kernel tree. The action-frame patches show the PSF and MIF frames discovery runs on. Little about this protocol is documented, so start there if you're extending this work.
+0001–0008 are the `brcm80211` commits [aurora-silicon/linux](https://github.com/aurora-silicon/linux) `aurora-wip` carries, with the same patch IDs: our series from [#24](https://github.com/aurora-silicon/linux/pull/24), then the maintainers' follow-up from [#183](https://github.com/aurora-silicon/linux/pull/183). They apply here to Asahi's `asahi-7.1.13-3`, which also carries a port-authorization fix in `cfg80211.c` that `aurora-wip` lacks. So after applying only 0001–0008, the tree differs from `aurora-wip` at `bc1823a` by that fix alone. 0009 restores the tx-completion log that #183 compiled out of release builds, which `omdrop-discoverable` counts to tell a transmitting radio from a parked one; it is proposed upstream in [#213](https://github.com/aurora-silicon/linux/pull/213). 0010–0014 are instrumentation that stays out of the kernel tree. The action-frame patches show the PSF and MIF frames discovery runs on. Little about this protocol is documented, so start there if you're extending this work.
 
 ## Hardware compatibility
 
@@ -211,6 +214,8 @@ The patches configure AWDL the firmware already implements, so they only work on
 | MacBook Air (2020), M1 | BCM4378 | `14e4:4425` | Receiving from an iPhone, Everyone | [omdrop-plugin#12](https://github.com/brentkearney/omdrop-plugin/issues/12) |
 | MacBook Pro 16-inch (2023), M2 Pro | BCM4388 | `14e4:4434` | Receiving from an iPhone, Everyone | [#16](https://github.com/brentkearney/omdrop-awdl/issues/16) |
 | MacBook Air 13-inch (2022), M2 | BCM4387 | `14e4:4433` | Receiving from a Mac | [omdrop-plugin#17](https://github.com/brentkearney/omdrop-plugin/issues/17) |
+
+BCM4388 firmware `23.20.95` rejects the service record in the form BCM4387 takes, and accepts it only behind a 4-byte length header. `omdrop-discoverable` tries the BCM4387 form first and falls back to the header form ([#23](https://github.com/brentkearney/omdrop-awdl/pull/23)).
 
 ### Probably works
 
