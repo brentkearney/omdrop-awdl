@@ -91,9 +91,12 @@ With a window open:
 /usr/lib/omdrop/send-to-peer --mac e2:9d:.. FILE  # choose a peer
 /usr/lib/omdrop/send-to-peer --wait 120 FILE      # keep trying while an iPhone sleeps
 /usr/lib/omdrop/send-to-peer FILE1 FILE2 ...      # several files, as one transfer
+/usr/lib/omdrop/send-to-peer --mac hume --url https://example.com/   # a web link
 ```
 
 The recipient's prompt shows the `--name` value, `Omarchy` by default. Several files go as one transfer, so the recipient accepts them once. Files must have different names, because the recipient stores each under its name alone. `--list` leaves out this machine's own AWDL address, which the firmware's tables can include.
+
+`--url` sends a web link the way Safari on an iPhone does: the URL travels in the `/Ask` itself (`TransferType` `links`), and no `/Upload` follows. A Mac opens it in a browser tab. Only `http` and `https` links are accepted, and links and files go in separate sends.
 
 The sender doesn't wait for mDNS. A peer's address is the EUI-64 link-local of its AWDL MAC, and its port comes from the service it advertises. A Mac with no Finder AirDrop window open publishes nothing over mDNS but still listens, so waiting for mDNS would miss it. An iPhone opens its listener only for a few seconds around other AirDrop activity, so `--wait` polls and sends the moment it opens. Opening a share sheet on the phone brings its listener up.
 
