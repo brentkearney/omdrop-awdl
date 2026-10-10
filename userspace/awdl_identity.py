@@ -418,6 +418,36 @@ def _read_user_file(path, user, root):
     return result.stdout
 
 
+_EXISTS_CHILD = """
+import os, sys
+tests = {'l': os.path.lexists, 'e': os.path.exists}
+print(''.join('1' if tests[m](p) else '0' for m, p in zip(sys.argv[1::2], sys.argv[2::2])))
+"""
+
+
+def _user_paths_exist(checks, user, root):
+    """[(mode, path)] -> [bool], tested with the invoking user's permissions.
+
+    Mode 'l' is lexists and 'e' is exists. Root walking a path the user built
+    would answer whether files exist behind directories the user cannot enter.
+    """
+    drop = _as_user(user, root)
+    if not drop:
+        tests = {'l': os.path.lexists, 'e': os.path.exists}
+        return [tests[mode](path) for mode, path in checks]
+    argv = [arg for mode, path in checks for arg in (mode, str(path))]
+    try:
+        result = subprocess.run([sys.executable, '-c', _EXISTS_CHILD, *argv],
+                                stdin=subprocess.DEVNULL, stdout=subprocess.PIPE,
+                                stderr=subprocess.DEVNULL, text=True, **drop)
+    except OSError:
+        raise IdentityError('invoking-user-invalid') from None
+    answer = result.stdout.strip()
+    if result.returncode or len(answer) != len(checks) or set(answer) - {'0', '1'}:
+        raise IdentityError('invoking-user-invalid')
+    return [bit == '1' for bit in answer]
+
+
 def _disk_matches(certificate, key, user=None, root=False):
     drop = _as_user(user, root) if user is not None else {}
     try:
@@ -513,14 +543,15 @@ def resolve_identity(*, keys=None, computer_name=None, create=True):
     directory = (Path(keys) if keys is not None else Path(user.pw_dir) / '.omdrop') / 'keys'
     certificate, key = directory / 'certificate.pem', directory / 'key.pem'
     record = directory / 'validation_record.cms'
-    disk = _pair_state(certificate, key)
-    disk.update(record=record.exists(), match=False)
+    self_cert, self_key = directory / 'certificate.self-signed.pem', directory / 'key.self-signed.pem'
+    have = _user_paths_exist([('l', certificate), ('l', key), ('e', record),
+                              ('l', self_cert), ('l', self_key)], user, root)
+    disk = {'certificate': have[0], 'key': have[1], 'record': have[2], 'match': False}
     mode = window['source'] if window else settings.get('identity_source', 'disk')
     if mode == 'disk' and disk['certificate'] and disk['key']:
         disk['match'] = _disk_matches(certificate, key, user, root)
-    self_cert, self_key = directory / 'certificate.self-signed.pem', directory / 'key.self-signed.pem'
     choice = select_identity(settings, window, cache, disk,
-                             _pair_state(self_cert, self_key), root or not create, now)
+                             {'certificate': have[3], 'key': have[4]}, root or not create, now)
     if 'error' in choice:
         raise IdentityError(choice['error'])
     for note in choice['warnings']:

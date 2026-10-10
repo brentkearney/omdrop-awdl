@@ -33,6 +33,8 @@ class PrivilegedInputTests(unittest.TestCase):
         self.source = DISCOVERABLE.read_text()
 
     def harness(self, body, *names):
+        # The validators are what every path under test calls first.
+        names = ("is_uint", "is_duration") + tuple(n for n in names if n not in ("is_uint", "is_duration"))
         fragments = "\n".join(function(self.source, n) for n in names)
         script = f'''
 set -uo pipefail
@@ -66,15 +68,101 @@ mdns_reclaim(){{ :; }}
         self.assert_not_executed(result)
         self.assertFalse((self.root / "spawned").exists())
 
-    def test_a_guessed_token_is_refused(self):
+    def test_a_guessed_token_is_refused_and_leaves_the_real_one(self):
         (self.run_dir / "supervisor.token").write_text("0" * 32)
         result = self.harness(
             f"OMDROP_SUPERVISOR_TOKEN={'1' * 32} supervise_entry 0 0",
             "is_uint", "supervise", "supervise_entry")
         self.assertEqual(result.returncode, 2)
         self.assertFalse((self.root / "spawned").exists())
-        # A failed attempt also burns the token, so it cannot be retried.
+        self.assertEqual((self.run_dir / "supervisor.token").read_text(), "0" * 32)
+
+    def test_a_direct_call_during_a_start_does_not_break_it(self):
+        # cmd_start has written the token and is spawning its child; another
+        # user's `pkexec ... __supervise` lands in between.
+        (self.run_dir / "supervisor.token").write_text("cd" * 16)
+        (self.run_dir / "until").write_text("1")
+        direct = self.harness("supervise_entry 1 600", "is_uint", "supervise", "supervise_entry")
+        self.assertEqual(direct.returncode, 2)
+        spawned = self.harness(
+            f"CONF={self.root}/conf LIB=/nonexistent IF=awdl0 ADV_FLAGS=137 "
+            f"OMDROP_SUPERVISOR_TOKEN={'cd' * 16} supervise_entry 1 600",
+            "is_uint", "supervise", "supervise_entry")
+        self.assertEqual(spawned.returncode, 0, spawned.stderr)
+        self.assertIn("spawn mdns", (self.root / "spawned").read_text())
         self.assertFalse((self.run_dir / "supervisor.token").exists())
+
+    def test_numbers_bash_would_misread_are_refused_before_arithmetic(self):
+        # 08 and 09 are invalid octal, 010 would be 8, and 20 digits wrap.
+        for value in ("08", "09", "010", "9" * 20):
+            with self.subTest(value=value):
+                start = self.harness(f"cmd_start {value}", "is_uint", "cmd_start")
+                self.assertEqual(start.returncode, 2, start.stderr)
+                self.assertIn("usage", start.stderr)
+                for args in (f"{value} 600", f"0 {value}"):
+                    (self.root / "spawned").unlink(missing_ok=True)
+                    (self.run_dir / "supervisor.token").write_text("ab" * 16)
+                    supervised = self.harness(
+                        f"OMDROP_SUPERVISOR_TOKEN={'ab' * 16} supervise_entry {args}",
+                        "is_uint", "supervise", "supervise_entry")
+                    self.assertEqual(supervised.returncode, 2, supervised.stderr)
+                    self.assertIn("must be a number", supervised.stderr)
+                    self.assertFalse((self.root / "spawned").exists())
+
+    def test_the_longest_duration_gives_a_deadline_the_child_accepts(self):
+        # Cold start: cmd_start computes now + secs and passes both to the
+        # child, which checks the deadline with is_uint and secs with
+        # is_duration. The longest accepted duration must survive both.
+        (self.run_dir / "supervisor.token").write_text("ab" * 16)
+        (self.run_dir / "until").write_text("1")
+        result = self.harness(
+            f"CONF={self.root}/conf LIB=/nonexistent IF=awdl0 ADV_FLAGS=137 "
+            f"OMDROP_SUPERVISOR_TOKEN={'ab' * 16} supervise_entry $(( $(date +%s) + 999999999 )) 999999999",
+            "supervise", "supervise_entry")
+        self.assertEqual(result.returncode, 0, result.stderr)
+
+    def test_one_second_longer_is_refused_before_any_work(self):
+        result = self.harness(f"cmd_start 1000000000; touch {self.marker}", "cmd_start")
+        self.assertEqual(result.returncode, 2, result.stderr)
+        self.assertIn("at most 999999999", result.stderr)
+        self.assertFalse(self.marker.exists())
+        self.assertFalse((self.run_dir / "start.lock").exists())
+
+    def test_extending_a_live_window_writes_a_deadline_the_supervisor_accepts(self):
+        (self.run_dir / "until").write_text("0")
+        extend = self.harness("supervisor_alive(){ return 0; }; cmd_start 999999999", "cmd_start")
+        self.assertEqual(extend.returncode, 5, extend.stderr)
+        deadline = (self.run_dir / "until").read_text().strip()
+        check = self.harness(f"is_uint {deadline} && echo accepted")
+        self.assertEqual(check.stdout.strip(), "accepted", deadline)
+        (self.run_dir / "until").write_text("0")
+        refused = self.harness("supervisor_alive(){ return 0; }; cmd_start 1000000000", "cmd_start")
+        self.assertEqual(refused.returncode, 2, refused.stderr)
+        self.assertEqual((self.run_dir / "until").read_text(), "0")
+
+    def test_read_refuses_iovars_outside_awdl(self):
+        for name in ("wsec_key", "pmk", "sae_password", "awdl"):
+            with self.subTest(name=name):
+                result = self.harness(
+                    f"iovar_get_len(){{ touch {self.marker}; }}; cmd_read {name}", "is_uint", "cmd_read")
+                self.assertEqual(result.returncode, 2, result.stderr)
+                self.assertIn("limited to awdl_", result.stderr)
+                self.assertFalse(self.marker.exists())
+
+    def test_read_still_reaches_the_firmware_for_awdl_iovars(self):
+        for name in ("awdl_peer_table", "ver", "cap"):
+            with self.subTest(name=name):
+                result = self.harness(
+                    f"iovar_get_len(){{ echo \"$1 $2\" >> {self.marker}; echo 0; }}; cmd_read {name} 64",
+                    "is_uint", "cmd_read")
+                self.assertEqual(result.returncode, 4, result.stderr)
+                self.assertIn(f"{name} 64", self.marker.read_text())
+
+    def test_read_refuses_a_length_bash_would_misread(self):
+        result = self.harness(f"iovar_get_len(){{ touch {self.marker}; }}; cmd_read awdl_stats 09",
+                              "is_uint", "cmd_read")
+        self.assertEqual(result.returncode, 2, result.stderr)
+        self.assertFalse(self.marker.exists())
 
     def test_the_spawned_supervisor_still_validates_its_seconds(self):
         # Even with the right token, a non-number never reaches arithmetic,

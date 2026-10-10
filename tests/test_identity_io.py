@@ -350,6 +350,49 @@ class KeyringReadTests(unittest.TestCase):
         self.assertEqual((os.getuid(), os.getgid(), os.getgroups()), parent)
 
 
+class UserPathExistenceTests(unittest.TestCase):
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.tmp.cleanup)
+        self.dir = Path(self.tmp.name)
+        self.user = types.SimpleNamespace(pw_uid=65534, pw_gid=65534, pw_dir='/unused')
+
+    def test_a_dangling_symlink_exists_only_as_a_link_in_parent_and_child(self):
+        link, present = self.dir / 'dangling', self.dir / 'present'
+        link.symlink_to(self.dir / 'missing')
+        present.write_bytes(b'x')
+        checks = [('l', link), ('e', link), ('e', present), ('l', self.dir / 'absent')]
+        want = [True, False, True, False]
+        self.assertEqual(identity._user_paths_exist(checks, self.user, False), want)
+        # The child's own answer, run without a credential drop.
+        with patch.object(identity, '_as_user', return_value={'env': dict(os.environ)}):
+            self.assertEqual(identity._user_paths_exist(checks, self.user, True), want)
+
+    def test_a_child_that_cannot_answer_is_an_error_not_absence(self):
+        for result in (subprocess.CompletedProcess([], 1, '', ''),
+                       subprocess.CompletedProcess([], 0, '1\n', ''),
+                       subprocess.CompletedProcess([], 0, '1x\n', '')):
+            with self.subTest(result=result), patch.object(identity.subprocess, 'run', return_value=result):
+                with self.assertRaises(identity.IdentityError) as caught:
+                    identity._user_paths_exist([('l', self.dir / 'a'), ('e', self.dir / 'b')], self.user, True)
+                self.assertEqual(str(caught.exception), 'invoking-user-invalid')
+        with patch.object(identity.subprocess, 'run', side_effect=BlockingIOError(11, 'try again')):
+            with self.assertRaises(identity.IdentityError) as caught:
+                identity._user_paths_exist([('l', self.dir / 'a')], self.user, True)
+            self.assertEqual(str(caught.exception), 'invoking-user-invalid')
+
+    @unittest.skipUnless(sys.platform == 'linux' and os.geteuid() == 0,
+                         'requires Linux root to exercise a real credential drop')
+    def test_root_sees_only_what_the_invoking_user_can_reach(self):
+        hidden = self.dir / 'root-only'
+        hidden.mkdir(mode=0o700)
+        (hidden / 'secret').write_bytes(b'x')
+        self.dir.chmod(0o755)
+        self.assertTrue(os.path.exists(hidden / 'secret'))
+        self.assertEqual(identity._user_paths_exist([('e', hidden / 'secret'), ('l', hidden / 'secret')],
+                                                    self.user, True), [False, False])
+
+
 class CacheProtectionTests(unittest.TestCase):
     @unittest.skipUnless(sys.platform == 'linux', 'Linux process dump protection')
     def test_cache_protection_disables_dumpability_and_core_limits_in_child(self):
