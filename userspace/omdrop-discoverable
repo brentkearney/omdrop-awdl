@@ -425,6 +425,28 @@ PYX
 ) || return 0
   iovar_set awdl_election_tree "$payload" && log "identity: rssi thresholds ${t} dBm"
 }
+
+# Write the service TLVs (bare hex) to awdl_afs_pload, trying both formats
+# measured in the field; returns 0 on the first the firmware accepts. The
+# header form is le16(4) + le16(total) + TLVs with total = 4 + body length:
+# the firmware copies total-4 bytes. Measured on BCM4388 Apple firmware
+# 23.20.95 (Jun 2023): le16(4)+le16(body) was accepted but stored a block
+# truncated by 4 bytes -- the TXT record lost its tail (RAM-dump verified:
+# "flags=136" stored as "flags"+4 garbage); le16(4)+le16(4+body) stores the
+# full block byte-identical.
+afs_pload_write(){
+  local hdr
+  if iovar_set awdl_afs_pload "$1"; then
+    log "identity: afs_pload $(( ${#1} / 2 )) B written (bare TLVs)"
+    return 0
+  fi
+  hdr=$(python3 -c "import struct,sys;print((struct.pack('<HH',4,4+len(bytes.fromhex(sys.argv[1])))+bytes.fromhex(sys.argv[1])).hex())" "$1")
+  if iovar_set awdl_afs_pload "$hdr"; then
+    log "identity: afs_pload $(( ${#1} / 2 )) B written (le16(4)+le16(4+len) header)"
+    return 0
+  fi
+  return 1
+}
 # Our AWDL identity on air: the PSF template (so our sync frames are well
 # formed) and the Arpa + _airdrop._tcp service TLVs Apple reads out of MIFs.
 write_identity(){
@@ -450,11 +472,19 @@ write_identity(){
   # writes ruled out). Diagnostic switches: without the service TLV nothing can
   # resolve us, so a window with either set is a measurement, not a usable one.
   # NOTE THE ASYMMETRY, measured: awdl_payload takes `le16(len) + body` and
-  # rejects a bare body with BCME_BUFTOOSHORT (-14, printed EFAULT);
-  # awdl_afs_pload takes the TLVs BARE and rejects a length-prefixed buffer with
-  # BCME_BUFTOOLONG (-15, printed ENOTBLK). A harness line elsewhere looks like a
-  # counter-example but belongs to a different call path -- do not "fix" this one
-  # to match it without reading the firmware's answer.
+  # rejects a bare body with BCME_BUFTOOSHORT (-14, printed EFAULT).
+  # awdl_afs_pload is firmware-variant: the firmware this was first measured
+  # on takes the TLVs BARE and rejects a length-prefixed buffer with
+  # BCME_BUFTOOLONG (-15, printed ENOTBLK), while the BCM4388 Apple firmware
+  # 23.20.95.0.40.50.92 (Jun 2023, MBP 16-inch 2023) rejects the bare TLVs
+  # with BCME_BADLEN (-24, printed EMFILE) for any buffer >= 8 B (smaller
+  # gives BCME_BUFTOOSHORT) and wants `le16(4) + le16(total) + TLVs` with
+  # total = 4 + body length: it copies total-4 bytes, so le16(body) silently
+  # stores the block truncated by 4 bytes (RAM-dump verified: the TXT record
+  # lost its "=136" tail) while le16(4 + body) stores it byte-identical. The
+  # first u16 is not content-checked (0, 4 and 8 all pass). So try bare
+  # first (the measured-good form for the original firmware) and fall back
+  # to the header form for the firmware that wants it.
   #
   # These TLVs are where a Mac reads our _airdrop._tcp advert: with them a peer
   # Mac resolves us and tiles in 3.0 s.
@@ -462,8 +492,8 @@ write_identity(){
   svc=$(python3 "$LIB/mkpsf.py" --service-only)
   if [[ -e $CONF/no-service ]]; then
     log "identity: afs_pload suppressed ($CONF/no-service)"
-  elif iovar_set awdl_afs_pload "$svc"; then
-    log "identity: afs_pload $(( ${#svc} / 2 )) B written"
+  elif afs_pload_write "$svc"; then
+    :
   else
     log "SERVICE WRITE FAILED: awdl_afs_pload SET rejected by the firmware"
   fi
