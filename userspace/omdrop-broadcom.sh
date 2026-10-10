@@ -37,6 +37,40 @@ die(){ local rc=$1; shift; log "$*"; exit "$rc"; }
 now(){ date +%s; }
 
 need_root(){ [[ $EUID -eq 0 ]] || die 2 "needs root: pkexec $0 $*"; }
+
+# run_dir: make $RUN a directory only root can change, before root writes in
+# it. pkexec keeps the caller's umask, and a helper without its own `umask 022`
+# run after `umask 000` created this directory 0777 and its files 0666. Anyone
+# could then plant `pids` (root signals every pid it names) or a link where
+# root opens a file by name (security review, RADIO-RUNDIR-TRUST). /run is a
+# tmpfs, so such a directory lasts until reboot, across a package upgrade.
+# Repaired here: never through a link, links and entries root did not create
+# removed, group and other write taken away. "Root" is whoever runs this:
+# uid 0 in the field, the tester in the tests.
+run_dir(){
+  local bad
+  # /run is root's, so a link in place of the directory is not ours to follow.
+  if [[ -L $RUN ]]; then rm -f -- "$RUN" || return 1; fi
+  mkdir -p -m 755 -- "$RUN" 2>/dev/null
+  [[ -d $RUN && ! -L $RUN ]] || return 1
+  bad=$(find "$RUN" -maxdepth 1 \( -type l -o ! -user "$EUID" -o -perm /022 \) -print -quit) \
+    || return 1
+  [[ -n $bad ]] || return 0
+  [[ -O $RUN ]] || chown -h -- "$EUID" "$RUN" || return 1
+  chmod go-w -- "$RUN" || return 1
+  find "$RUN" -mindepth 1 -maxdepth 1 \( -type l -o ! -user "$EUID" \) -exec rm -rf -- {} + \
+    || return 1
+  find "$RUN" -mindepth 1 -maxdepth 1 -perm /022 -exec chmod go-w -- {} + || return 1
+  log "repaired $RUN: it was writable by others, or held links or files root did not create"
+}
+# need_run_dir: run_dir, or stop before root writes anything. Not die: its log
+# would append to the very directory that could not be trusted.
+need_run_dir(){
+  run_dir && return 0
+  printf '%s\n' "$(date -u +%H:%M:%SZ) $RUN is not a directory only root can write, and could not be made one" >&2
+  exit 3
+}
+
 # Every value that reaches bash arithmetic -- $(( )), (( )), or a -lt/-gt
 # comparison inside [[ ]] -- must pass this first. Arithmetic expands its
 # operands as expressions, and an array subscript is expanded too, so a value
@@ -60,18 +94,45 @@ fwerr(){ dmesg | grep -o "firmware error -\?[0-9]*" | tail -1 | grep -o '\-\?[0-
 # On failure the firmware's reason is the whole diagnosis, and it used to go to
 # /dev/null: 05:3xZ an awdl_payload SET was rejected on every window of the
 # night and nothing said why. Keep stdout for the caller to log.
+#
+# `timeout --foreground` here and for awdl-up: plain timeout moves itself and
+# its child into a process group of their own, so the group SIGTERM/SIGKILL
+# omdrop-core sends a cancelled or overdue hook missed them, and a SET could
+# land after `stop` had reported the radio off (security review,
+# HOOK-TIMEOUT-PGRP-ESCAPE). Both are single processes, so --foreground, which
+# only stops timing out the child's own children, loses nothing.
 iovar_set(){ local out rc; dmesg -C
-             out=$(timeout 8 python3 "$LIB/brcm_iovar.py" -i "$IF" set "$1" "$2" 2>&1); rc=$?
+             out=$(timeout --foreground 8 python3 "$LIB/brcm_iovar.py" -i "$IF" set "$1" "$2" 2>&1); rc=$?
              (( rc == 0 )) || log "iovar_set $1: rc=$rc ${out##*$'\n'}"
              return $rc; }
+# reply_file <tag>: a new, empty file in $RUN for one GET's reply, under a name
+# nobody can predict. The names used to be fixed (payload.bin,
+# read.<iovar>.bin, diag.*.bin) and deleted before each GET, after which root
+# had brcm_iovar.py open that name: in a run directory others could write, a
+# link planted between the delete and the open made root overwrite any file
+# with firmware bytes. mktemp creates the file itself, exclusively.
+reply_file(){ mktemp "$RUN/$1.XXXXXX"; }
+# iovar_get_len <iovar> <len> <file>: one GET into <file>, a fresh reply_file,
+# printing the reply's size, 0 for none.
+#
 # brcm_iovar.py writes --raw only when the GET succeeds, so a leftover file
 # from an earlier call reads as a live value: after a driver reload the
 # template was gone, `awdl_payload` GET returned EROFS (AWDL disabled), and the
 # stale 512-byte file from the previous window made the gate refuse the
-# retoggle for a template that no longer existed. Delete first, then measure.
-iovar_get_len(){ rm -f "$3"
-                 timeout 8 python3 "$LIB/brcm_iovar.py" -i "$IF" get "$1" -l "$2" --raw "$3" >/dev/null 2>&1
-                 stat -c %s "$3" 2>/dev/null || echo 0; }
+# retoggle for a template that no longer existed. A fresh file is empty, so
+# that cannot happen; one with no reply is removed, which leaves the caller
+# exactly what the old delete-then-GET did.
+iovar_get_len(){ local n
+                 timeout --foreground 8 python3 "$LIB/brcm_iovar.py" -i "$IF" get "$1" -l "$2" --raw "$3" >/dev/null 2>&1
+                 n=$(stat -c %s "$3" 2>/dev/null) || n=0
+                 [[ $n == 0 ]] && rm -f "$3"
+                 echo "$n"; }
+# iovar_len <iovar> <len>: the size of one GET's reply, 0 for none; the reply
+# itself is not kept. 0 too when no reply file can be made, as when the old
+# fixed name could not be written.
+iovar_len(){ local f n
+             f=$(reply_file "$1") || { echo 0; return 0; }
+             n=$(iovar_get_len "$1" "$2" "$f"); rm -f "$f"; echo "$n"; }
 le32(){ python3 -c "import struct,sys;print(struct.pack('<I',int(sys.argv[1])).hex())" "$1"; }
 
 awdl0_ready(){
@@ -209,7 +270,7 @@ gate(){
   n=$(probe_completions) || return 2
   log "gate: probe 20 frames -> $n completions"
   if [[ ${n:-0} -ge 15 ]]; then open_on_transmit probe; return 0; fi
-  local plen; plen=$(iovar_get_len awdl_payload 512 "$RUN/payload.bin")
+  local plen; plen=$(iovar_len awdl_payload 512)
   if [[ ${plen:-0} -gt 0 ]]; then
     log "gate: template loaded (awdl_payload len $plen); no awdl=0 retoggle (023513Z)"
     return 1
@@ -242,7 +303,9 @@ self_metric(){ local em; em=$(head -1 "$CONF/election-metric" 2>/dev/null | tr -
 # distance 0 and metric 510, us root of our own tree, two disjoint trees,
 # action frames crossing and no data. Advertise what we actually run.
 election_state(){
-  local etree=$RUN/etree.bin opmode=$RUN/opmode.bin
+  local etree opmode rc
+  etree=$(reply_file etree) || return 1
+  opmode=$(reply_file opmode) || { rm -f "$etree"; return 1; }
   iovar_get_len awdl_election_tree 42 "$etree" >/dev/null
   iovar_get_len awdl_opmode 12 "$opmode" >/dev/null
   python3 - "$etree" "$opmode" "$(cat /sys/class/net/$IF/address)" "$(self_metric)" "$LIB" <<'PYX'
@@ -265,6 +328,9 @@ if master == us:
 depth = dep.group(1) if dep else '0'
 print(master, sync, depth, mm, mine)
 PYX
+  rc=$?
+  rm -f "$etree" "$opmode"
+  return "$rc"
 }
 
 # write_template <state...>: the PSF template for one election state.
@@ -353,10 +419,11 @@ track_election(){
 # at -75 dBm while the Mac in the same room sits at -50 in its own tree. -60 keeps the
 # election to peers that are actually in the room.
 write_rssi_thresholds(){
-  local t=$1 before=$RUN/etree.rssi.bin payload
+  local t=$1 before payload rc
   [[ ${#t} -gt 0 ]] || return 0
+  before=$(reply_file etree.rssi) || return 0
   [[ $(iovar_get_len awdl_election_tree 42 "$before") -eq 42 ]] || {
-    log "rssi thresholds: readback was not 42 bytes; not writing"; return 0; }
+    rm -f "$before"; log "rssi thresholds: readback was not 42 bytes; not writing"; return 0; }
   payload=$(python3 - "$before" "$t" <<'PYX'
 import sys
 b = bytearray(open(sys.argv[1], 'rb').read())
@@ -365,7 +432,10 @@ for off in (7, 9, 10, 11):
     b[off] = t
 print(bytes(b).hex())
 PYX
-) || return 0
+)
+  rc=$?
+  rm -f "$before"
+  [[ $rc == 0 ]] || return 0
   iovar_set awdl_election_tree "$payload" && log "identity: rssi thresholds ${t} dBm"
 }
 
@@ -488,7 +558,7 @@ radio_up(){
   # and carry on.
   if ! awdl0_ready && driver_loaded; then
     log "$IF is missing but the driver is loaded (a Wi-Fi off/on removes it); rebuilding it"
-    timeout 60 "$LIB/awdl-up" >/dev/null 2>&1 || true
+    timeout --foreground 60 "$LIB/awdl-up" >/dev/null 2>&1 || true
     awdl0_ready || sleep 2
   fi
 
@@ -527,7 +597,7 @@ radio_up(){
        # sentence a person reads goes last. Naming a reload in a panel is
        # useless -- there is nothing to press -- and a restart clears the same
        # state without a terminal.
-       if [[ $(iovar_get_len awdl_payload 512 "$RUN/payload.bin") -gt 0 ]]; then
+       if [[ $(iovar_len awdl_payload 512) -gt 0 ]]; then
          log "parked with a template loaded (023513Z): the gate cannot retoggle awdl, retrying is byte-identical. Reload to clear: pkexec $LIB/awdl-up --reload (~15 s of Wi-Fi)."
          die 3 "AirDrop's radio is stuck and cannot restart itself. Restarting this machine clears it."
        fi
@@ -585,13 +655,14 @@ radio_tick(){
 #
 # Each call gets its own reply file. The panel reads the table every couple of
 # seconds while a name lookup and a send read it too, and with one shared file
-# a call's delete-before-read (see iovar_get_len) wiped another's reply
-# mid-read: 5 of 12 concurrent calls failed "no reply" on 2026-09-24.
+# a call's delete-before-read (iovar_get_len used to delete first) wiped
+# another's reply mid-read: 5 of 12 concurrent calls failed "no reply" on
+# 2026-09-24.
 cmd_peers(){
   need_root peers
-  mkdir -p "$RUN"
+  need_run_dir
   local raw len rc
-  raw=$(mktemp "$RUN/advertisers.XXXXXX") || { echo "awdl_advertisers: cannot create a reply file in $RUN" >&2; exit 4; }
+  raw=$(reply_file advertisers) || { echo "awdl_advertisers: cannot create a reply file in $RUN" >&2; exit 4; }
   len=$(iovar_get_len awdl_advertisers 1024 "$raw")
   if [[ ${len:-0} -gt 0 ]]; then
     python3 "$LIB/awdl-peers.py" "$raw"; rc=$?
@@ -622,13 +693,17 @@ cmd_peers(){
 # while the infra link sits on 44, so every master AW costs a band switch.
 cmd_diag(){
   need_root diag
-  mkdir -p "$RUN"
-  local secs=${1:-15} rx0 rx1
+  need_run_dir
+  local secs=${1:-15} rx0 rx1 opm= chs= syn= st0= st1=
   is_uint "$secs" && (( secs <= 600 )) || die 2 "usage: $0 diag [seconds, at most 600]"
-  iovar_get_len awdl_opmode 12 "$RUN/diag.opmode.bin" >/dev/null
-  iovar_get_len awdl_chan_seq 64 "$RUN/diag.chanseq.bin" >/dev/null
-  iovar_get_len awdl_sync_params 64 "$RUN/diag.sync.bin" >/dev/null
-  python3 - "$RUN/diag.opmode.bin" "$RUN/diag.chanseq.bin" "$RUN/diag.sync.bin" <<'PYX'
+  opm=$(reply_file diag.opmode) && chs=$(reply_file diag.chanseq) && syn=$(reply_file diag.sync) \
+    && st0=$(reply_file diag.stats.0) && st1=$(reply_file diag.stats.1) || {
+    rm -f -- $opm $chs $syn $st0 $st1
+    echo "diag: cannot create reply files in $RUN" >&2; exit 4; }
+  iovar_get_len awdl_opmode 12 "$opm" >/dev/null
+  iovar_get_len awdl_chan_seq 64 "$chs" >/dev/null
+  iovar_get_len awdl_sync_params 64 "$syn" >/dev/null
+  python3 - "$opm" "$chs" "$syn" <<'PYX'
 import struct, sys
 opmode, chanseq, sync = sys.argv[1:4]
 def load(path):
@@ -657,17 +732,18 @@ if len(b) >= 38:
 else:
     print(f'chan_seq    unreadable ({len(b)} B)')
 PYX
-  iovar_get_len awdl_stats 324 "$RUN/diag.stats.0.bin" >/dev/null
+  iovar_get_len awdl_stats 324 "$st0" >/dev/null
   rx0=$(cat "/sys/class/net/$IF/statistics/rx_packets" 2>/dev/null || echo 0)
   sleep "$secs"
-  iovar_get_len awdl_stats 324 "$RUN/diag.stats.1.bin" >/dev/null
+  iovar_get_len awdl_stats 324 "$st1" >/dev/null
   rx1=$(cat "/sys/class/net/$IF/statistics/rx_packets" 2>/dev/null || echo 0)
   # Both directions. --rx hid aftx, and 04:5xZ that was the field in question:
   # a Mac only schedules unicast to a peer in its table, and its table is built
   # from our ACTION frames -- so "are we emitting any" is as important as what
   # we receive.
-  python3 "$LIB/awdl-stats.py" "$RUN/diag.stats.0.bin" "$RUN/diag.stats.1.bin"
+  python3 "$LIB/awdl-stats.py" "$st0" "$st1"
   printf 'netdev rx_packets %s -> %s over %ss (%+d)\n' "$rx0" "$rx1" "$secs" "$(( rx1 - rx0 ))"
+  rm -f "$opm" "$chs" "$syn" "$st0" "$st1"
   exit 0
 }
 
@@ -693,12 +769,14 @@ cmd_read(){
     || die 2 "read is limited to awdl_* iovars, ver and cap"
   is_uint "$len" && (( len <= 8192 )) || die 2 "len must be a number up to 8192"
   need_root read "$name"
-  mkdir -p "$RUN"
-  local raw=$RUN/read.$name.bin got
+  need_run_dir
+  local raw got
+  raw=$(reply_file "read.$name") || { echo "$name: cannot create a reply file in $RUN" >&2; exit 4; }
   got=$(iovar_get_len "$name" "$len" "$raw")
-  [[ ${got:-0} -gt 0 ]] || { echo "$name: no reply (unsupported, or AWDL disabled)" >&2; exit 4; }
+  [[ ${got:-0} -gt 0 ]] || { rm -f "$raw"; echo "$name: no reply (unsupported, or AWDL disabled)" >&2; exit 4; }
   echo "$name: $got bytes"
   od -An -tx1 -v "$raw" | sed 's/^ /  /' | head -64
+  rm -f "$raw"
   exit 0
 }
 

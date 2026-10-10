@@ -31,19 +31,26 @@ HOOKS = ("up", "identity", "tick", "peer-watch", "peers", "diag", "read", "trace
 CORE_FILES = ("log", "until", "reason", "rx_proven", "rx_base", "supervisor",
               "supervisor.token", "start.lock", "pids", "announce")
 
-# brcm_iovar.py: log every call; a GET answers with the bytes of get.<iovar>
-# or fails; a SET fails when its value matches the regex in reject.<iovar>.
+# brcm_iovar.py: log every call and the process group it ran in; a GET answers
+# with the bytes of get.<iovar> or fails, and records its --raw path and
+# whether that file already existed (raw.log); a SET fails when its value
+# matches the regex in reject.<iovar>.
 IOVAR = r'''import os, re, sys
 stub = os.environ["STUB"]
 args = sys.argv[1:]
 with open(os.path.join(stub, "iovar.log"), "a") as f:
     f.write(" ".join(args) + "\n")
+with open(os.path.join(stub, "iovar.pgrp"), "a") as f:
+    f.write(f"{os.getpgrp()}\n")
 op, name = args[2], args[3]
 if op == "get":
+    raw = args[args.index("--raw") + 1]
+    with open(os.path.join(stub, "raw.log"), "a") as f:
+        f.write(f"{raw} {os.path.isfile(raw) and not os.path.islink(raw)}\n")
     src = os.path.join(stub, "get." + name)
     if not os.path.exists(src):
         sys.exit("get failed")
-    open(args[args.index("--raw") + 1], "wb").write(open(src, "rb").read())
+    open(raw, "wb").write(open(src, "rb").read())
     sys.exit(0)
 reject = os.path.join(stub, "reject." + name)
 if os.path.exists(reject) and re.search(open(reject).read().strip(), args[4]):
@@ -57,6 +64,8 @@ stub = os.environ["STUB"]
 name = os.path.basename(sys.argv[0])
 with open(os.path.join(stub, name + ".log"), "a") as f:
     f.write(" ".join(sys.argv[1:]) + "\n")
+with open(os.path.join(stub, name + ".pgrp"), "a") as f:
+    f.write(f"{os.getpgrp()}\n")
 out = os.path.join(stub, name + ".out")
 if os.path.exists(out):
     sys.stdout.write(open(out).read())
@@ -130,12 +139,19 @@ driver_loaded(){{ [[ -e {self.stub}/driver ]]; }}
         for name, text in STUBS.items():
             executable(self.bin / name, text)
 
-    def hook(self, name, *args, hooks=None):
+    def hook(self, name, *args, hooks=None, umask=None):
         env = dict(os.environ, STUB=str(self.stub),
                    PATH=f"{self.bin}:{os.environ['PATH']}",
                    OMDROP_CONF=str(self.root / "conf"))
-        result = subprocess.run([str((hooks or self.lib / "radio") / name), *args],
-                                capture_output=True, text=True, env=env, timeout=60, cwd="/")
+        # As core runs a hook: in a process group of its own. umask stands in
+        # for whatever the caller of pkexec had.
+        with subprocess.Popen([str((hooks or self.lib / "radio") / name), *args],
+                              stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True,
+                              env=env, cwd="/", start_new_session=True,
+                              preexec_fn=None if umask is None else (lambda: os.umask(umask))) as p:
+            out, err = p.communicate(timeout=60)
+        result = subprocess.CompletedProcess(p.args, p.returncode, out, err)
+        result.pid = p.pid
         # Conformance: a hook never writes core's files, whatever it did.
         written = [f for f in CORE_FILES if (self.run_dir / f).exists()]
         self.assertEqual(written, [], f"{name} wrote core files: {result.stderr}")
@@ -401,6 +417,148 @@ class PeerWatchTests(HookHarness):
         self.assertEqual(self.log("awdl-peer-watch.py.log"), "--iface awdl0 --only \n")
 
 
+class RunDirTests(HookHarness):
+    """Root writes in the run directory only once nobody else can.
+
+    pkexec keeps the caller's umask, so a helper without its own made the
+    directory 0777 and its files 0666 after `umask 000`, and such a directory
+    lasts until reboot. Every hook that writes there repairs it first.
+    """
+
+    @staticmethod
+    def mode(path):
+        return stat.S_IMODE(os.lstat(path).st_mode)
+
+    def test_a_writable_run_directory_is_repaired_before_use(self):
+        victim = self.root / "victim"
+        victim.write_text("precious\n")
+        self.run_dir.mkdir()
+        self.run_dir.chmod(0o777)
+        state = self.run_dir / "election.state"
+        state.write_text("x\n")
+        state.chmod(0o666)
+        # Links where root used to open files by name.
+        for name in ("log", "pids", "payload.bin", "read.awdl_stats.bin"):
+            (self.run_dir / name).symlink_to(victim)
+        (self.stub / "get.awdl_stats").write_bytes(b"\1\2")
+        result = self.hook("read", "awdl_stats", "512")
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn("repaired", result.stderr)
+        self.assertEqual(self.mode(self.run_dir), 0o755)
+        self.assertEqual(self.mode(state), 0o644)
+        self.assertEqual([p.name for p in self.run_dir.iterdir() if p.is_symlink()], [])
+        self.assertEqual(victim.read_text(), "precious\n")
+
+    def test_a_safe_run_directory_is_left_alone(self):
+        self.run_dir.mkdir()
+        self.run_dir.chmod(0o755)
+        state = self.run_dir / "election.state"
+        state.write_text("x\n")
+        state.chmod(0o644)
+        result = self.hook("peers")
+        self.assertEqual(result.returncode, 4, result.stderr)
+        self.assertNotIn("repaired", result.stderr)
+        self.assertEqual(state.read_text(), "x\n")
+
+    def test_a_link_in_place_of_the_run_directory_is_not_followed(self):
+        elsewhere = self.root / "elsewhere"
+        elsewhere.mkdir()
+        self.run_dir.symlink_to(elsewhere)
+        result = self.hook("tick", "1")
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertFalse(self.run_dir.is_symlink())
+        self.assertTrue((self.run_dir / "election.state").exists())
+        self.assertEqual(list(elsewhere.iterdir()), [])
+
+    def test_a_run_directory_that_cannot_be_made_safe_stops_the_hook(self):
+        self.run_dir.write_text("not a directory\n")
+        for argv in (("up",), ("identity",), ("tick", "1"), ("peer-watch",), ("peers",),
+                     ("diag", "0"), ("read", "awdl_stats", "512")):
+            with self.subTest(argv=argv):
+                result = self.hook(*argv)
+                self.assertEqual(result.returncode, 3, result.stderr)
+                self.assertIn("could not be made one", result.stderr.splitlines()[-1])
+                self.assertFalse(self.touched_firmware())
+        self.assertEqual(self.run_dir.read_text(), "not a directory\n")
+
+    def test_files_are_created_root_only_whatever_the_umask(self):
+        result = self.hook("tick", "1", umask=0)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(self.mode(self.run_dir), 0o755)
+        self.assertEqual(self.mode(self.run_dir / "election.state"), 0o644)
+
+
+class ReplyFileTests(HookHarness):
+    """Every GET's reply goes to a file mktemp made, never to a fixed name."""
+
+    def assert_fresh_replies(self, count):
+        entries = [line.rsplit(" ", 1) for line in self.log("raw.log").splitlines()]
+        self.assertEqual(len(entries), count, entries)
+        paths = [path for path, _ in entries]
+        self.assertEqual(len(set(paths)), len(paths), "a reply file name was reused")
+        for path, existed in entries:
+            # Created exclusively before brcm_iovar.py opened it, in the run
+            # directory, and gone once its reader is done.
+            self.assertEqual(existed, "True", path)
+            self.assertEqual(Path(path).parent, self.run_dir)
+            self.assertFalse(Path(path).exists(), f"{path} left behind")
+
+    def test_read(self):
+        (self.stub / "get.awdl_stats").write_bytes(b"\1\2")
+        self.assertEqual(self.hook("read", "awdl_stats", "512").returncode, 0)
+        self.assert_fresh_replies(1)
+
+    def test_diag(self):
+        result = self.hook("diag", "0")
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assert_fresh_replies(5)
+
+    def test_tick(self):
+        for seq in ("1", "2"):
+            self.assertEqual(self.hook("tick", seq).returncode, 0)
+        self.assert_fresh_replies(4)
+
+    def test_identity_with_rssi_thresholds(self):
+        conf = self.root / "conf"
+        conf.mkdir()
+        (conf / "rssi-sync-threshold").write_text("-60\n")
+        (self.stub / "get.awdl_election_tree").write_bytes(bytes(42))
+        result = self.hook("identity")
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn("rssi thresholds -60 dBm", result.stderr)
+        # The readback with bytes 7 and 9-11 patched to -60 (0xc4).
+        patched = bytearray(42)
+        for off in (7, 9, 10, 11):
+            patched[off] = 0xC4
+        self.assertIn(f"set awdl_election_tree {patched.hex()}", self.log("iovar.log"))
+        # The RSSI readback, then the election tree and opmode for the template.
+        self.assert_fresh_replies(3)
+
+    def test_up_parked_without_a_template(self):
+        for name in ("awdl0", "driver", "linklocal"):
+            (self.stub / name).touch()
+        (self.stub / "awdl_trace").write_text("0")
+        self.assertEqual(self.hook("up").returncode, 3)
+        # The gate's template check, and radio_up's before it picks a sentence.
+        self.assert_fresh_replies(2)
+
+
+class ProcessGroupTests(HookHarness):
+    """Core cancels a hook by signalling its process group; nothing may leave it."""
+
+    def test_firmware_calls_stay_in_the_hooks_group(self):
+        (self.stub / "get.awdl_stats").write_bytes(b"\1\2")
+        result = self.hook("read", "awdl_stats", "512")
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(set(self.log("iovar.pgrp").split()), {str(result.pid)})
+
+    def test_rebuilding_awdl0_stays_in_the_hooks_group(self):
+        (self.stub / "driver").touch()
+        result = self.hook("up")
+        self.assertEqual(result.returncode, 4, result.stderr)
+        self.assertEqual(self.log("awdl-up.pgrp").split(), [str(result.pid)])
+
+
 class ProbeTests(unittest.TestCase):
     def setUp(self):
         self.tmp = tempfile.TemporaryDirectory()
@@ -558,6 +716,25 @@ class DiscoverableStillUsesTheLibraryTests(unittest.TestCase):
                                     timeout=30, cwd="/")
         self.assertEqual(result.returncode, 2, result.stderr)
         self.assertIn("cannot read", result.stderr)
+
+    def test_discoverable_writes_root_only_files_whatever_the_umask(self):
+        # pkexec passes the caller's umask on. A usage error logs to $RUN/log,
+        # which is enough to see the mode the helper creates files with.
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp = Path(tmp)
+            run = tmp / "run"
+            run.mkdir()
+            run.chmod(0o755)
+            helper = tmp / "omdrop-discoverable"
+            shutil.copy2(USERSPACE / "omdrop-discoverable", helper)
+            (tmp / "omdrop-broadcom.sh").write_text(
+                (USERSPACE / "omdrop-broadcom.sh").read_text() + f"\nRUN={run}\nLOG=$RUN/log\n")
+            result = subprocess.run([str(helper), "read", "wsec_key"], capture_output=True,
+                                    text=True, timeout=30, cwd="/",
+                                    preexec_fn=lambda: os.umask(0))
+            self.assertEqual(result.returncode, 2, result.stderr)
+            self.assertIn("limited to awdl_", (run / "log").read_text())
+            self.assertEqual(stat.S_IMODE((run / "log").stat().st_mode), 0o644)
 
 
 if __name__ == "__main__":

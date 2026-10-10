@@ -9,6 +9,9 @@
 #      1: the firmware rejected the template rewrite; it is retried next tick.
 #      2: usage, or not root.
 set -uo pipefail
+# pkexec and core may hand us any umask; what this creates in the run
+# directory must be writable by root alone.
+umask 022
 # The library and the Python helpers sit one directory up: /usr/lib/omdrop when
 # packaged. Resolved from our own realpath, never the working directory.
 LIB="$(cd "$(dirname "$(readlink -f "$0")")/.." && pwd)"
@@ -19,5 +22,5 @@ hook_mode
 # in arithmetic here.
 (( $# == 1 )) && [[ $1 =~ ^[1-9][0-9]{0,18}$ ]] || die 2 "usage: $0 <seq>"
 need_root tick
-mkdir -p "$RUN"
+need_run_dir
 radio_tick

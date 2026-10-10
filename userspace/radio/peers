@@ -7,6 +7,9 @@
 #      2: usage, or not root.
 #      4: no reply (AWDL disabled, or no awdl0).
 set -uo pipefail
+# pkexec and core may hand us any umask; what this creates in the run
+# directory must be writable by root alone.
+umask 022
 # The library and the Python helpers sit one directory up: /usr/lib/omdrop when
 # packaged. Resolved from our own realpath, never the working directory.
 LIB="$(cd "$(dirname "$(readlink -f "$0")")/.." && pwd)"

@@ -28,6 +28,11 @@
 #   4  awdl0 absent or down; driver not loaded
 #   5  already discoverable; the window was extended instead of stacking
 set -uo pipefail
+# pkexec keeps the caller's umask. Everything this creates under $RUN is read
+# by `status` as the user and must be written by root alone: after `umask 000`
+# the directory came out 0777 and its files 0666 (security review,
+# RADIO-RUNDIR-TRUST).
+umask 022
 
 # Helpers live beside this script: /usr/lib/omdrop when packaged. Resolved from
 # our own realpath rather than the working directory, because pkexec runs us
@@ -42,6 +47,11 @@ LIB="$(cd "$(dirname "$SELF")" && pwd)"
 # are root-owned under /usr/lib/omdrop.
 # shellcheck source=omdrop-broadcom.sh
 . "$LIB/omdrop-broadcom.sh" || { echo "omdrop-discoverable: cannot read $LIB/omdrop-broadcom.sh" >&2; exit 2; }
+# Before any command, because every one of them, even a usage error, writes
+# under $RUN as root (log appends there). run_dir repairs a directory an
+# earlier helper left writable to others; unprivileged, there is nothing to
+# protect and `status` must stay read-only.
+if [[ $EUID -eq 0 ]]; then need_run_dir; fi
 # Announcer burst: 40 frames per interval is what reaches Apple devices through
 # our 4 active slots of 16 (~25% of submitted frames make the air).
 ADV_COUNT=40

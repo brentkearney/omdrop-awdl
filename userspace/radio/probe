@@ -10,6 +10,9 @@
 # Exit 0: the JSON object on stdout.
 #      2: usage.
 set -uo pipefail
+# Creates nothing, but every hook starts from a known umask, whatever its
+# caller had.
+umask 022
 # The package version, written in by the PKGBUILD at install. The helper
 # contract omdrop-plugin compares (PR #25) is the package version as well.
 VERSION=@VERSION@
