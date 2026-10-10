@@ -78,7 +78,16 @@ need_root(){ [[ $EUID -eq 0 ]] || die 2 "needs root: pkexec $0 $*"; }
 # through polkit, with any argv they choose; the state files under $RUN are
 # root-owned, but they are checked as well so that no arithmetic here depends
 # on where its input came from.
-is_uint(){ [[ $1 =~ ^[0-9]+$ ]]; }
+#
+# Canonical decimal only: bash reads a leading 0 as octal, so 010 is 8 and 08
+# is an error, and a long enough digit string wraps negative.
+#
+# Two widths, so that a deadline computed from an accepted duration is always
+# an accepted deadline. A duration has at most nine digits (about 31 years);
+# now plus any duration stays within is_uint's twelve digits until the year
+# 33,000, both where start computes it and where an extension asks date(1).
+is_uint(){ [[ $1 =~ ^(0|[1-9][0-9]{0,11})$ ]]; }
+is_duration(){ [[ $1 =~ ^(0|[1-9][0-9]{0,8})$ ]]; }
 
 # --- firmware helpers -------------------------------------------------------
 fwerr(){ dmesg | grep -o "firmware error -\?[0-9]*" | tail -1 | grep -o '\-\?[0-9]*$'; }
@@ -574,7 +583,7 @@ supervise(){
   # $1 was the deadline at spawn; it is deliberately not bound, because the
   # loop below re-reads $RUN/until so a later press can move it.
   local secs=$2 seq=0
-  is_uint "$secs" || die 2 "__supervise: seconds must be a number"
+  is_duration "$secs" || die 2 "__supervise: seconds must be a number"
   echo $$ > "$RUN/supervisor"
   trap 'kill_children; printf stopped > "$RUN/reason"; rm -f "$RUN/until"; exit 0' TERM INT
   spawn mdns python3 "$LIB/awdl-mdns-respond.py" --iface "$IF" --port 8771 --flags "$ADV_FLAGS"
@@ -651,9 +660,12 @@ supervise_entry(){
   want=${OMDROP_SUPERVISOR_TOKEN:-}
   unset OMDROP_SUPERVISOR_TOKEN
   got=$(cat "$RUN/supervisor.token" 2>/dev/null) || got=
-  rm -f "$RUN/supervisor.token"
+  # Removed only by the spawn it was written for. A direct call that cannot
+  # present it leaves it alone, so it cannot make a real start fail; guessing
+  # 128 random bits again gains nothing.
   [[ -n $want && $want =~ ^[0-9a-f]{32}$ && $want == "$got" ]] \
     || die 2 "__supervise is internal; use: $0 start <seconds>"
+  rm -f "$RUN/supervisor.token"
   is_uint "$1" || die 2 "__supervise: deadline must be a number"
   supervise "$1" "$2"
 }
@@ -697,7 +709,7 @@ cmd_start(){
   # 0 is a window with no expiry, which is what the panel's "Until I turn it
   # off" asks for. Rejecting it made that setting fail with a usage string in
   # the panel: omdrop passes ${secs:-0}, so every unbounded press sent a 0.
-  [[ $secs =~ ^[0-9]+$ ]] || die 2 "usage: $0 start <seconds> (0 = until stopped)"
+  is_duration "$secs" || die 2 "usage: $0 start <seconds> (0 = until stopped, at most 999999999)"
   need_root start "$secs"
   mkdir -p "$RUN"
   # One start at a time. `supervisor_alive` only catches a window that is
@@ -830,7 +842,7 @@ cmd_start(){
   # a window that failed to come up.
   local i
   for i in 1 2 3 4 5 6 7 8 9 10; do supervisor_alive && break; sleep 0.5; done
-  supervisor_alive || { printf stopped > "$RUN/reason"; die 3 "supervisor did not start"; }
+  supervisor_alive || { rm -f "$RUN/supervisor.token"; printf stopped > "$RUN/reason"; die 3 "supervisor did not start"; }
   if (( secs > 0 )); then
     log "discoverable until $(date -u -d "@$until" +%H:%M:%SZ) (${secs}s)"
   else
@@ -1039,9 +1051,9 @@ PYX
   exit 0
 }
 
-# read <iovar> [len]: one GET, hexdumped. Read-only by construction -- there is
-# no code path here that writes, and the verb name carries no value argument to
-# write with.
+# read <iovar> [len]: one GET of an AWDL iovar, hexdumped. GET-only by
+# construction -- there is no code path here that issues a SET, and the verb
+# name carries no value argument to set with.
 #
 # Why it exists: the investigation reached "what did the firmware actually
 # store when we wrote awdl_peer_op ADD for that peer?", and nothing could
@@ -1049,11 +1061,17 @@ PYX
 # script is allowlisted -- so every readback of a new iovar cost a password
 # prompt. GETs are the whole diagnostic vocabulary of this project; they should
 # not need a human.
+#
+# Only AWDL state and the firmware's version and capability strings. Any active
+# user reaches this as root without a prompt, and other iovars carry the Wi-Fi
+# network's credentials (wsec_key, pmk, sae_password); nothing here shows the
+# firmware refuses to read those back.
 cmd_read(){
   local name=${1:-} len=${2:-512}
   [[ -n $name ]] || die 2 "usage: $0 read <iovar> [len]"
-  [[ $name =~ ^[a-z0-9_]+$ ]] || die 2 "iovar names are lowercase, digits and underscore"
-  [[ $len =~ ^[0-9]+$ && $len -le 8192 ]] || die 2 "len must be a number up to 8192"
+  [[ $name =~ ^awdl_[a-z0-9_]+$ || $name == ver || $name == cap ]] \
+    || die 2 "read is limited to awdl_* iovars, ver and cap"
+  is_uint "$len" && (( len <= 8192 )) || die 2 "len must be a number up to 8192"
   need_root read "$name"
   mkdir -p "$RUN"
   local raw=$RUN/read.$name.bin got
