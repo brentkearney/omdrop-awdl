@@ -8,7 +8,7 @@ from pathlib import Path
 
 
 ROOT = Path(__file__).resolve().parents[1]
-DISCOVERABLE = ROOT / "userspace" / "omdrop-discoverable"
+BROADCOM = ROOT / "userspace" / "omdrop-broadcom.sh"
 
 # The two forms of the AWDL tx-completion line a brcmfmac can carry. Only the
 # pr_info() one, with the prefix in its format string, ever reaches the log
@@ -46,7 +46,7 @@ class TraceSupportTests(unittest.TestCase):
     def trace_support(self, ko, loaded_id=b"A" * 20, trace="/nonexistent"):
         loaded = self.root / "loaded-build-id"
         loaded.write_bytes(self.note(loaded_id))
-        source = DISCOVERABLE.read_text()
+        source = BROADCOM.read_text()
         start = source.index("trace_support(){")
         fragment = source[start:source.index("\n}\n", start) + 3]
         harness = f'''

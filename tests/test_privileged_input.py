@@ -14,6 +14,8 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
 DISCOVERABLE = ROOT / "userspace" / "omdrop-discoverable"
+# The functions omdrop-discoverable sources; the radio hooks source it too.
+BROADCOM = ROOT / "userspace" / "omdrop-broadcom.sh"
 
 
 def function(source, name):
@@ -30,7 +32,7 @@ class PrivilegedInputTests(unittest.TestCase):
         self.run_dir.mkdir()
         self.marker = self.root / "executed"
         self.payload = f"a[$(touch {self.marker})]"
-        self.source = DISCOVERABLE.read_text()
+        self.source = DISCOVERABLE.read_text() + BROADCOM.read_text()
 
     def harness(self, body, *names):
         # The validators are what every path under test calls first.
