@@ -97,6 +97,21 @@ package() {
   # the invoking user can write to would hand that user root.
   local lib="${pkgdir}/usr/lib/omdrop"
   install -Dm755 "${startdir}/userspace/omdrop-discoverable" "${lib}/omdrop-discoverable"
+  # Sourced, never executed: the Broadcom half of omdrop-discoverable (the
+  # gate, the AWDL identity, the iovar helpers), shared with the hooks below.
+  install -Dm644 "${startdir}/userspace/omdrop-broadcom.sh" "${lib}/omdrop-broadcom.sh"
+  # The radio backend hooks omdrop-core's root supervisor runs instead of
+  # omdrop-discoverable (omdrop-core's docs/backend-contract.md): one
+  # executable per hook, in the root-owned directory core looks in. Each
+  # sources omdrop-broadcom.sh from the directory above it.
+  local hook
+  for hook in up identity tick peer-watch peers diag read trace; do
+    install -Dm755 "${startdir}/userspace/radio/${hook}" "${lib}/radio/${hook}"
+  done
+  # probe reports the package version, which omdrop-plugin compares against
+  # the helper contract it needs.
+  sed "s/@VERSION@/${pkgver}/" "${startdir}/userspace/radio/probe" > "${lib}/radio/probe"
+  chmod 755 "${lib}/radio/probe"
   install -Dm755 "${startdir}/userspace/awdl-up" "${lib}/awdl-up"
   local helper
   for helper in awdl-airdrop-adv awdl-election awdl-mdns-respond awdl-peer-watch \
