@@ -121,21 +121,50 @@ spawn(){  # spawn <tag> <command...>
 # half-run teardown left the window's state inconsistent. `mv` is atomic: the
 # winner takes the list and the loser sees no file and returns quietly, so the
 # whole teardown happens exactly once no matter how many callers arrive.
+#
+# omdrop-core's root helper shares this run directory and writes its lines as
+# `<pid> <tag> <start time>`. A pid alone may have been reused since by any
+# process; with the start time it names exactly one, so a line that has one is
+# signalled only while /proc still shows that process (security review,
+# LEGACY-START-OVER-CORE-WINDOW). Our own lines carry no start time.
 kill_children(){
   local pidfile=$RUN/pids snapshot=$RUN/pids.dying.$$
   [[ -f $pidfile ]] || return 0
   mv "$pidfile" "$snapshot" 2>/dev/null || return 0
-  local pid tag
-  while read -r pid tag; do
-    [[ -n ${pid:-} ]] || continue
+  local pid tag start
+  while read -r pid tag start; do
+    same_process "${pid:-}" "${start:-}" || continue
     kill -TERM "$pid" 2>/dev/null && log "stopped $tag (pid $pid)"
   done < "$snapshot"
   sleep 1
-  while read -r pid tag; do
-    [[ -n ${pid:-} ]] || continue
+  while read -r pid tag start; do
+    same_process "${pid:-}" "${start:-}" || continue
     kill -KILL "$pid" 2>/dev/null
   done < "$snapshot"
   rm -f "$snapshot"
+}
+
+# start_time <pid>: the process's start time in clock ticks since boot, field
+# 22 of /proc/<pid>/stat. Counted after the command name, which is in
+# parentheses and may itself hold spaces and parentheses.
+start_time(){
+  local stat
+  local -a f=()
+  stat=$(cat "/proc/$1/stat" 2>/dev/null) || return 1
+  read -r -a f <<<"${stat##*) }"
+  printf '%s' "${f[19]:-}"
+}
+
+# same_process <pid> [start time]: whether a pids line still names a process
+# that may be signalled. Only a positive pid: kill(1) reads 0 as our own
+# process group and -1 as every process. With a start time, only the process
+# that started then; without, whatever has the pid, as this helper always did.
+same_process(){
+  [[ $1 =~ ^[1-9][0-9]{0,9}$ ]] || return 1
+  [[ -z $2 ]] && return 0
+  local now
+  now=$(start_time "$1") || return 1
+  [[ -n $now && $now == "$2" ]]
 }
 
 # The supervisor owns the window: it starts the advertising children, bursts
@@ -229,7 +258,9 @@ supervise_entry(){
   supervise "$1" "$2"
 }
 
-supervisor_pid(){ cat "$RUN/supervisor" 2>/dev/null; }
+# The pid only: omdrop-core's root helper, which shares this run directory,
+# writes `<pid> <start time>` here.
+supervisor_pid(){ local pid _; { read -r pid _ < "$RUN/supervisor"; } 2>/dev/null; printf '%s' "${pid:-}"; }
 
 # Enumerate by exact argv pairs instead of grepping /proc/*/cmdline. Omarchy's
 # small grep replacement does not search those NUL-separated procfs files, so
@@ -263,15 +294,40 @@ supervisor_pids(){
   done
 }
 
+# omdrop-core's root helper runs the same window from the same run directory
+# (its docs/backend-contract.md). Its supervisor is that binary, exec'd as
+# itself and running as root, so its argv[0] and argv[1] are fixed. Matched by
+# position and owner, not anywhere in argv: a root process this helper runs
+# for any user, such as a 600 s `diag`, used to carry whatever argv tail the
+# user chose (security review, RADIO-ARGV-PAIR-ANYWHERE).
+CORE_RADIO=/usr/lib/omdrop-core/omdrop-radio
+CORE_UID=0
+core_supervisor_pids(){
+  local proc key real eff _
+  local -a argv=()
+  for proc in /proc/[0-9]*; do
+    argv=()
+    mapfile -d '' -t argv < "$proc/cmdline" 2>/dev/null || continue
+    [[ ${argv[0]:-} == "$CORE_RADIO" && ${argv[1]:-} == __supervise ]] || continue
+    key= real= eff=
+    while read -r key real eff _; do
+      [[ $key == Uid: ]] && break
+    done 2>/dev/null < "$proc/status"
+    [[ $key == Uid: && $real == "$CORE_UID" && $eff == "$CORE_UID" ]] || continue
+    printf '%s\n' "${proc##*/}"
+  done
+}
+
 # /proc, not `kill -0`: status runs as the unprivileged user and signalling a
-# root process fails with EPERM, which reported a live window as expired.
+# root process fails with EPERM, which reported a live window as expired. A
+# window omdrop-core's helper opened is live too.
 supervisor_alive(){
   local recorded owned
   recorded=$(supervisor_pid)
-  [[ -n ${recorded:-} && -d /proc/$recorded ]] || return 1
+  [[ $recorded =~ ^[1-9][0-9]*$ && -d /proc/$recorded ]] || return 1
   while read -r owned; do
     [[ $owned == "$recorded" ]] && return 0
-  done < <(supervisor_pids)
+  done < <(supervisor_pids; core_supervisor_pids)
   return 1
 }
 
@@ -303,6 +359,18 @@ cmd_start(){
   exec 9>"$RUN/start.lock"
   if ! flock -n 9; then
     log "another start is already in its gate; not racing it"
+    exit 5
+  fi
+
+  # A window omdrop-core's helper opened is not ours to extend or replace:
+  # carrying on would kill its children, toggle awdl=0/1 under its supervisor
+  # and open a second window (security review, LEGACY-START-OVER-CORE-WINDOW).
+  # Its deadline is left as it is; `stop` from either helper ends it.
+  local core
+  core=$(core_supervisor_pids)
+  if [[ -n $core ]]; then
+    log "omdrop-core's helper is supervising this window (pid ${core//$'\n'/ }); leaving it alone"
+    log "Already discoverable through omdrop-core; that window was not changed."
     exit 5
   fi
 
@@ -471,14 +539,23 @@ cmd_status(){
   exit 0
 }
 
+# Extra arguments are refused, not ignored. polkit authorizes the program, not
+# its argv, and a root process this helper runs for any user -- `diag` lives up
+# to 600 s -- carried whatever tail the user appended, such as another
+# program's `<path> __supervise`, which made it look like that program's
+# supervisor (security review, RADIO-ARGV-PAIR-ANYWHERE).
+usage(){
+  printf 'usage: %s start <seconds> | stop | status [--json] | peers | diag [seconds] | read <iovar> [len] | trace [on|off]\n' "$0" >&2
+  exit 2
+}
 case "${1:-}" in
-  start)  shift; cmd_start "$@" ;;
-  stop)   cmd_stop ;;
-  status) shift; cmd_status "$@" ;;
-  peers)  cmd_peers ;;
-  diag)   shift; cmd_diag "$@" ;;
-  read)   shift; cmd_read "$@" ;;
-  trace)  shift; cmd_trace "$@" ;;
-  __supervise) shift; supervise_entry "$@" ;;
-  *) printf 'usage: %s start <seconds> | stop | status [--json] | peers | diag [seconds] | read <iovar> [len] | trace [on|off]\n' "$0" >&2; exit 2 ;;
+  start)  (( $# <= 2 )) || usage; shift; cmd_start "$@" ;;
+  stop)   (( $# == 1 )) || usage; cmd_stop ;;
+  status) (( $# <= 2 )) || usage; shift; cmd_status "$@" ;;
+  peers)  (( $# == 1 )) || usage; cmd_peers ;;
+  diag)   (( $# <= 2 )) || usage; shift; cmd_diag "$@" ;;
+  read)   (( $# <= 3 )) || usage; shift; cmd_read "$@" ;;
+  trace)  (( $# <= 2 )) || usage; shift; cmd_trace "$@" ;;
+  __supervise) (( $# <= 3 )) || usage; shift; supervise_entry "$@" ;;
+  *) usage ;;
 esac
