@@ -1,3 +1,4 @@
+import os
 import subprocess
 import tempfile
 import time
@@ -42,8 +43,9 @@ class SupervisorLifecycleTests(unittest.TestCase):
         start = source.index("supervisor_pid(){")
         return source[start:source.index("# --- commands", start)]
 
-    def run_fragment(self, body):
-        harness = f'''\nset -uo pipefail\nRUN={self.run}\nSELF={self.helper}\n# The workstation's grep replacement cannot search /proc/*/cmdline. The\n# lifecycle must not depend on grep accepting binary procfs files.\ngrep(){{ return 1; }}\n{self.lifecycle_fragment()}\n{body}\n'''
+    def run_fragment(self, body, supervisor_uid=os.getuid()):
+        uid_line = "" if supervisor_uid is None else f"SUPERVISOR_UID={supervisor_uid}\n"
+        harness = f'''\nset -uo pipefail\nRUN={self.run}\nSELF={self.helper}\n{uid_line}# The workstation's grep replacement cannot search /proc/*/cmdline. The\n# lifecycle must not depend on grep accepting binary procfs files.\ngrep(){{ return 1; }}\n{self.lifecycle_fragment()}\n{body}\n'''
         return subprocess.run(["bash", "-c", harness], capture_output=True, text=True)
 
     def test_recorded_supervisor_is_recognized_without_grep(self):
@@ -114,6 +116,29 @@ supervise 0 0
 
         self.assertEqual(process.wait(timeout=5), 0)
         self.assertEqual((self.run / "reason").read_text(), "stopped")
+
+    def test_a_lookalike_process_from_another_uid_is_ignored(self):
+        # Any local user can start a process whose argv contains `$SELF
+        # __supervise` and ignore TERM. supervisor_pids must require the
+        # supervisor's real UID (0 in production), or stop waits 10 s for the
+        # look-alike and logs that a supervisor ignored TERM.
+        self.helper.write_text(
+            "#!/usr/bin/env bash\n"
+            "trap '' TERM\n"
+            "sleep 30\n")
+        lookalike = self.spawn("__supervise", "0", "0")
+        supervisor_uid = None if os.getuid() != 0 else 65534
+
+        started = time.monotonic()
+        result = self.run_fragment(
+            f"supervisor_pids; kill -TERM {lookalike.pid}; wait_supervisors_gone",
+            supervisor_uid=supervisor_uid,
+        )
+
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(result.stdout.strip(), "")
+        self.assertLess(time.monotonic() - started, 1.0)
+        self.assertIsNone(lookalike.poll())
 
 
 if __name__ == "__main__":
