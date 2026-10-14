@@ -512,7 +512,8 @@ def main():
     ap.add_argument("--print", dest="show", action="store_true",
                     help="print the sender command without running it")
     ap.add_argument("--port", type=int, default=AIRDROP_PORT)
-    ap.add_argument("--name", default="Omarchy", help="SenderComputerName the peer shows")
+    ap.add_argument("--name", default=socket.gethostname().split(".")[0],
+                    help="SenderComputerName the peer shows. Default: the short hostname")
     ap.add_argument("--op-timeout", type=float, default=60.0,
                     help="seconds to wait on each request; /Ask waits for a human")
     ap.add_argument("--wait", type=float, default=0.0, metavar="SECONDS",
