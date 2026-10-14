@@ -4,7 +4,7 @@ AWDL protocol activation for Apple Silicon Macs on Linux: fourteen patches to `b
 
 AWDL (Apple Wireless Direct Link) is the link layer AirDrop and AirPlay run over. These patches expose the Wi-Fi firmware's own AWDL implementation as an `awdl0` interface, instead of reimplementing the protocol in userspace.
 
-This is the radio backend [Omdrop](https://github.com/brentkearney/omdrop-plugin) uses on Apple Silicon Macs running [Omarchy M](https://github.com/omacom/omarchy-mac). On PCs with other Wi-Fi cards, Omdrop 0.16.0 and later runs over [omdrop-owl](https://github.com/t4t5/omdrop-owl) instead, which implements AWDL in software. The two packages conflict, so a computer has one or the other. The functional patches are merged into `aurora-wip`, the development branch of Omarchy's `linux-aurora` kernel ([aurora-silicon/linux#24](https://github.com/aurora-silicon/linux/pull/24)). The trace fix is proposed in [#213](https://github.com/aurora-silicon/linux/pull/213). Until a `linux-aurora` release ships both, the Omdrop plugin builds these patches as a DKMS module.
+This is the radio backend [Omdrop](https://github.com/netmojo-systems/omdrop-plugin) uses on Apple Silicon Macs running [Omarchy M](https://github.com/omacom/omarchy-mac). On PCs with other Wi-Fi cards, Omdrop 0.16.0 and later runs over [omdrop-owl](https://github.com/t4t5/omdrop-owl) instead, which implements AWDL in software. The two packages conflict, so a computer has one or the other. The functional patches are merged into `aurora-wip`, the development branch of Omarchy's `linux-aurora` kernel ([aurora-silicon/linux#24](https://github.com/aurora-silicon/linux/pull/24)). The trace fix is proposed in [#213](https://github.com/aurora-silicon/linux/pull/213). Until a `linux-aurora` release ships both, the Omdrop plugin builds these patches as a DKMS module.
 
 - [Install](#install)
 - [What the package installs](#what-the-package-installs)
@@ -20,7 +20,7 @@ This is the radio backend [Omdrop](https://github.com/brentkearney/omdrop-plugin
 ## Install
 
 ```bash
-git clone https://github.com/brentkearney/omdrop-awdl.git
+git clone https://github.com/netmojo-systems/omdrop-awdl.git
 cd omdrop-awdl
 makepkg -si
 ```
@@ -80,7 +80,7 @@ pkexec /usr/lib/omdrop/omdrop-discoverable stop
 
 ### Receiving
 
-This package is the radio side only. The receiving HTTPS service is in the [Omdrop plugin](https://github.com/brentkearney/omdrop-plugin), where `omdrop on 10m` opens a window and starts the receiver together. Any AirDrop receiver listening on `[<awdl0 link-local>]:8771` works.
+This package is the radio side only. The receiving HTTPS service is in the [Omdrop plugin](https://github.com/netmojo-systems/omdrop-plugin), where `omdrop on 10m` opens a window and starts the receiver together. Any AirDrop receiver listening on `[<awdl0 link-local>]:8771` works.
 
 To send to this machine from a Contacts Only device, this machine needs an Apple-issued identity, which the sender checks it against. Without one, set the sender to **Everyone**; a self-signed certificate is rejected at TLS.
 
@@ -183,7 +183,7 @@ Nothing is required. The helpers read the MAC, Wi-Fi interface, and hostname at 
 
 ## Power
 
-An open window costs 71 mW (95% CI 59.8–82.5), measured on an M1 Pro over 5.6 hours of alternating six-minute blocks. That's 1.5% of a 4.71 W idle machine: a ten-minute window costs about 19 seconds of battery, and staying discoverable all day costs 2% of a charge. How long to stay visible is a privacy question, not a battery one. The method and data are in [issue #8](https://github.com/brentkearney/omdrop-awdl/issues/8#issuecomment-5731084807).
+An open window costs 71 mW (95% CI 59.8–82.5), measured on an M1 Pro over 5.6 hours of alternating six-minute blocks. That's 1.5% of a 4.71 W idle machine: a ten-minute window costs about 19 seconds of battery, and staying discoverable all day costs 2% of a charge. How long to stay visible is a privacy question, not a battery one. The method and data are in [issue #8](https://github.com/netmojo-systems/omdrop-awdl/issues/8#issuecomment-5731084807).
 
 ## The patches
 
@@ -213,11 +213,11 @@ Intel-based Macs also have Broadcom Wi-Fi, but this package doesn't support them
 | Mac | Wi-Fi chip | WLAN PCI ID | Verified | Report |
 | --- | --- | --- | --- | --- |
 | MacBook Pro 16-inch (2021), M1 Pro | BCM4387 | `14e4:4433` | Sending and receiving, iPhone and Mac, Everyone and Contacts Only | |
-| MacBook Air (2020), M1 | BCM4378 | `14e4:4425` | Receiving from an iPhone, Everyone | [omdrop-plugin#12](https://github.com/brentkearney/omdrop-plugin/issues/12) |
-| MacBook Pro 16-inch (2023), M2 Pro | BCM4388 | `14e4:4434` | Receiving from an iPhone, Everyone | [#16](https://github.com/brentkearney/omdrop-awdl/issues/16) |
-| MacBook Air 13-inch (2022), M2 | BCM4387 | `14e4:4433` | Receiving from a Mac | [omdrop-plugin#17](https://github.com/brentkearney/omdrop-plugin/issues/17) |
+| MacBook Air (2020), M1 | BCM4378 | `14e4:4425` | Receiving from an iPhone, Everyone | [omdrop-plugin#12](https://github.com/netmojo-systems/omdrop-plugin/issues/12) |
+| MacBook Pro 16-inch (2023), M2 Pro | BCM4388 | `14e4:4434` | Receiving from an iPhone, Everyone | [#16](https://github.com/netmojo-systems/omdrop-awdl/issues/16) |
+| MacBook Air 13-inch (2022), M2 | BCM4387 | `14e4:4433` | Receiving from a Mac | [omdrop-plugin#17](https://github.com/netmojo-systems/omdrop-plugin/issues/17) |
 
-BCM4388 firmware `23.20.95` rejects the service record in the form BCM4387 takes, and accepts it only behind a 4-byte length header. `omdrop-discoverable` tries the BCM4387 form first and falls back to the header form ([#23](https://github.com/brentkearney/omdrop-awdl/pull/23)).
+BCM4388 firmware `23.20.95` rejects the service record in the form BCM4387 takes, and accepts it only behind a 4-byte length header. `omdrop-discoverable` tries the BCM4387 form first and falls back to the header form ([#23](https://github.com/netmojo-systems/omdrop-awdl/pull/23)).
 
 ### Probably works
 
@@ -241,7 +241,7 @@ Same Wi-Fi chip as a Mac above, not yet tested:
 
 Sources: the [Asahi device list](https://asahilinux.org/docs/hw/devices/device-list/), [Asahi's WLAN PCI IDs](https://github.com/AsahiLinux/linux/blob/asahi/drivers/net/wireless/broadcom/brcm80211/include/brcm_hw_ids.h), and an [Apple device-tree radio inventory](https://gist.github.com/JJTech0130/bf7dbc5b4ea1442a07bbd58bb1ae89c4).
 
-Tried it on another Mac? [Send a hardware report](https://github.com/brentkearney/omdrop-awdl/issues/new?template=hardware-report.yml), working or not.
+Tried it on another Mac? [Send a hardware report](https://github.com/netmojo-systems/omdrop-awdl/issues/new?template=hardware-report.yml), working or not.
 
 ## Maintenance
 

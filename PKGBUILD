@@ -16,7 +16,7 @@ pkgrel=1
 _asahitag=asahi-7.1.13-3
 pkgdesc="AWDL (AirDrop link layer) support for Apple Broadcom Wi-Fi (BCM4378, BCM4387, BCM4388): DKMS module and root helpers"
 arch=('aarch64')
-url="https://github.com/brentkearney/omdrop-awdl"
+url="https://github.com/netmojo-systems/omdrop-awdl"
 license=('GPL-2.0-only')
 # The helpers are bash and python3 and drive the radio through ip(8), ping(8),
 # flock(1), setsid(1) and pgrep(1). polkit is what lets an unprivileged desktop
@@ -27,7 +27,7 @@ license=('GPL-2.0-only')
 # linux-asahi-headers is a hard dependency, not an optional one. Without it the
 # DKMS hook has nothing to compile against and silently builds nothing, so the
 # stock brcmfmac stays loaded and awdl0 cannot be created
-# (brentkearney/omdrop-plugin#17).
+# (netmojo-systems/omdrop-plugin#17).
 depends=('dkms' 'linux-asahi-headers' 'bash' 'python' 'iproute2' 'iputils'
          'kmod' 'polkit' 'procps-ng' 'util-linux' 'systemd' 'keyutils'
          'python-libarchive-c' 'python-pillow' 'python-zeroconf' 'python-ifaddr')

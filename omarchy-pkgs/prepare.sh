@@ -125,7 +125,7 @@ cat > "$dest/.omarchy/package.json" <<JSON
   "source": "local",
   "upstream": {
     "watch": {
-      "github": "brentkearney/$repo",
+      "github": "netmojo-systems/$repo",
       "pattern": "v(?P<version>[0-9]+(?:\\\\.[0-9]+)*)"
     }
   }

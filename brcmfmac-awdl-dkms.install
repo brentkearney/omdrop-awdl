@@ -22,7 +22,7 @@ post_install() {
 
   Nothing advertises until something asks. The interface is the omdrop plugin:
 
-      omarchy plugin add https://github.com/brentkearney/omdrop-plugin.git
+      omarchy plugin add https://github.com/netmojo-systems/omdrop-plugin.git
       omarchy plugin enable netmojo.omdrop
 
   Then turn Omdrop on from its icon in the bar. The first time, it finishes

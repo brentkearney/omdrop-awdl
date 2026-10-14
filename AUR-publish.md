@@ -12,7 +12,7 @@ The AUR is a git-hosted recipe index — you push a PKGBUILD, not a binary. User
  3. Sources fetched, not vendored. This is the real work for us. Our `PKGBUILD` builds from `${startdir}` — files sitting
     next to it. An AUR package must declare a `source=()` array pointing at a URL, with checksums. So it becomes
 
-    `source=("$pkgname-$pkgver.tar.gz::https://github.com/brentkearney/omdrop-awdl/archive/v0.1.0.tar.gz")` 
+    `source=("$pkgname-$pkgver.tar.gz::https://github.com/netmojo-systems/omdrop-awdl/archive/v0.1.0.tar.gz")` 
     
     plus sha256sums, and package() reads from `$srcdir` instead. That's a mechanical but non-trivial rewrite, and it's the reason the v0.1.0 tag matters: the tarball URL is the tag.
 
