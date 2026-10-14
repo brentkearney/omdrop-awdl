@@ -10,7 +10,7 @@
 
 [Unit]
 Description=Create and configure awdl0 (firmware-native AWDL on BCM4387)
-Documentation=https://github.com/brentkearney/omdrop-awdl
+Documentation=https://github.com/netmojo-systems/omdrop-awdl
 # The Wi-Fi interface must exist and hold its permanent MAC before awdl0 can be
 # derived from it; NetworkManager is what would otherwise randomise it.
 # awdl-up finds the interface and waits for both conditions itself, so no
