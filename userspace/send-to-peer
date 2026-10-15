@@ -37,6 +37,11 @@ HELPER = os.path.join(TOOLS, "omdrop-discoverable")
 SENDER = os.path.join(TOOLS, "airdrop-send.py")
 ADVERTISER = os.path.join(TOOLS, "ble-airdrop-adv.py")
 AIRDROP_PORT = 8770
+# A peer that serves AirDrop on a port of its own, as Android's Quick Share
+# does with a random one, announces it only in its AWDL action frames. The
+# helper's `peers` reports it as `port=N`; Apple devices announce nothing and
+# are dialled on AIRDROP_PORT. Replaced whole on every read of the table.
+PORTS = {}
 IFACE = "awdl0"
 # The advert's ceiling for a name lookup, and the deadline its knocks wait to.
 # Not a sleep. The receiver binds its port in milliseconds; reaching it took
@@ -45,6 +50,13 @@ IFACE = "awdl0"
 # stop transmitting. A send waits, and advertises, for its own --wait.
 WAKE_SECONDS = 30
 WAKE_READY = 5.0       # how long to wait for the advertiser to say it registered
+# Android closes its AirDrop receiver about ten seconds after our BLE wake
+# stops, and a send has to outlast that: the person accepts it on the phone
+# first. So a send to it keeps the wake up until the sender exits, to this
+# ceiling (the proven run, 30.4 MB, took 10 s).
+# shortcut: a transfer that outlasts this loses the wake; restart the advert
+# before the ceiling if that ever matters.
+SEND_WAKE_SECONDS = 300
 
 
 def _wake_start(seconds=WAKE_SECONDS):
@@ -227,11 +239,16 @@ def peers():
         raise HelperFailed(
             f"could not read the peer table ({HELPER} exited {run.returncode})"
             + (f": {detail[-1]}" if detail else "") + hint)
-    found = {}
+    found, ports = {}, {}
     for line in run.stdout.splitlines():
         m = re.search(r"([0-9a-f]{2}(?::[0-9a-f]{2}){5})\s+rssi=\s*(-?\d+)", line)
         if m:
             found[m.group(1)] = int(m.group(2))
+        m = re.match(r"((?:[0-9a-f]{2}:){5}[0-9a-f]{2})\s.*\bport=(\d+)", line)
+        if m:
+            ports[m.group(1)] = int(m.group(2))
+    global PORTS
+    PORTS = ports
     # The advertisers table is a live snapshot and it empties between reads:
     # sampled every four seconds on 2026-09-20 it reported nobody in four reads
     # out of five while three peers were registered and audible. On its own it
@@ -312,7 +329,7 @@ def listening(host, port, timeout=2.0):
         s.close()
 
 
-def _knock(host, port, ready_by=None):
+def _knock(mac, port, ready_by=None):
     """Wait for a peer's AirDrop port to answer, up to an absolute deadline.
 
     Two knocks when there is no deadline, which is what --no-wake and a failed
@@ -324,14 +341,15 @@ def _knock(host, port, ready_by=None):
     comes back instantly and means the stack is there and the service is not,
     so it is paced rather than spun on.
     """
+    host = link_local(mac)
     if ready_by is None:
-        return any(listening(host, port, timeout=3.0) for _ in range(2))
+        return any(listening(host, PORTS.get(mac, port), timeout=3.0) for _ in range(2))
     while True:
         left = ready_by - time.monotonic()
         if left <= 0:
             return False
         t0 = time.monotonic()
-        if listening(host, port, timeout=min(3.0, left)):
+        if listening(host, PORTS.get(mac, port), timeout=min(3.0, left)):
             return True
         # An immediate answer means a refusal, not a timeout: sleep the
         # difference so a refusing peer is polled, not hammered.
@@ -384,7 +402,7 @@ def peer_name(mac, port, sender_name, timeout=8.0, ready_by=None):
     # the knock keeps trying until an absolute deadline rather than twice: the
     # bind is instant, the path is not, and two knocks inside seven seconds is
     # how the cold call of 19:23 reported two woken peers as absent.
-    knocked = _knock(link_local(mac), port, ready_by)
+    knocked = _knock(mac, port, ready_by)
     # A peer that answered a knock gets the full budget; one that ignored two
     # gets a single short ask, so a listing of absent devices stays in seconds.
     attempts, timeout = (3, timeout) if knocked else (1, 3.0)
@@ -401,7 +419,7 @@ def peer_name(mac, port, sender_name, timeout=8.0, ready_by=None):
     # What the budget rests on is simpler: retries cost little and a wrong
     # "nothing answered" is expensive, because it hides a device you could
     # otherwise name and send to.
-    target = f"[{link_local(mac)}%{IFACE}]:{port}"
+    target = f"[{link_local(mac)}%{IFACE}]:{PORTS.get(mac, port)}"
     # Twice, because the first attempt to an Apple peer is unreliable: macOS
     # accepts on identity, restarts its Bonjour server for a peer it classes as
     # legacy, and kills the connection in flight -- the server is ready again
@@ -511,7 +529,8 @@ def main():
     ap.add_argument("--list", action="store_true", help="list peers and their endpoints")
     ap.add_argument("--print", dest="show", action="store_true",
                     help="print the sender command without running it")
-    ap.add_argument("--port", type=int, default=AIRDROP_PORT)
+    ap.add_argument("--port", type=int, default=AIRDROP_PORT,
+                    help="AirDrop port of peers that announce none (Apple's)")
     ap.add_argument("--name", default=socket.gethostname().split(".")[0],
                     help="SenderComputerName the peer shows. Default: the short hostname")
     ap.add_argument("--op-timeout", type=float, default=60.0,
@@ -556,7 +575,7 @@ def main():
         rssi_of = dict(heard)
 
         def row(mac, got=None, named=False):
-            line = f"{mac}  {signal(rssi_of.get(mac))}  [{link_local(mac)}%{IFACE}]:{args.port}"
+            line = f"{mac}  {signal(rssi_of.get(mac))}  [{link_local(mac)}%{IFACE}]:{PORTS.get(mac, args.port)}"
             if named:
                 # Three outcomes, three words. A blank column would make
                 # "not receiving" and "would not say" look identical, and only
@@ -654,7 +673,8 @@ def main():
             print(f"  {m}  {signal(rssi)}", file=sys.stderr)
         return 2
 
-    target = f"[{link_local(mac)}%{IFACE}]:{args.port}"
+    port = PORTS.get(mac, args.port)
+    target = f"[{link_local(mac)}%{IFACE}]:{port}"
     # "--" so a file whose name begins with a dash is a file, not an option.
     cmd = [sys.executable, SENDER, "--direct", target,
            "--op-timeout", str(args.op_timeout), "--name", args.name,
@@ -673,28 +693,37 @@ def main():
     # name lookups do, but they stop when the panel closes, and choosing a file
     # closes it. So the wait raises the same wake the lookups use, for as long
     # as it waits, and stops it before the transfer starts.
-    if args.wait > 0 and not listening(link_local(mac), args.port):
-        print(f"waiting up to {args.wait:.0f}s for {mac} to start listening on "
-              f"{args.port}", file=sys.stderr)
-        opened = False
-        with contextlib.ExitStack() as stack:
-            if args.wake:
-                stack.enter_context(wake(args.wait, "waiting without a wake"))
-            deadline = time.monotonic() + args.wait
-            while time.monotonic() < deadline:
-                if listening(link_local(mac), args.port):
-                    opened = True
-                    break
-                time.sleep(1.0)
-        if not opened:
-            print(f"{mac} never opened {args.port}; on an iPhone, open a share "
-                  f"sheet or receive something to wake sharingd", file=sys.stderr)
-            return 3
+    #
+    # An Android phone, which announced its own port, is the exception: it
+    # shuts its receiver ten seconds after the wake stops and the person has
+    # to accept the file on it, so its wake runs until the sender exits, open
+    # port or not.
+    android = args.wake and mac in PORTS
+    with contextlib.ExitStack() as send:
+        if android:
+            send.enter_context(wake(SEND_WAKE_SECONDS, "sending without a wake"))
+        if args.wait > 0 and not listening(link_local(mac), port):
+            print(f"waiting up to {args.wait:.0f}s for {mac} to start listening on "
+                  f"{port}", file=sys.stderr)
+            opened = False
+            with contextlib.ExitStack() as stack:
+                if args.wake and not android:
+                    stack.enter_context(wake(args.wait, "waiting without a wake"))
+                deadline = time.monotonic() + args.wait
+                while time.monotonic() < deadline:
+                    if listening(link_local(mac), port):
+                        opened = True
+                        break
+                    time.sleep(1.0)
+            if not opened:
+                print(f"{mac} never opened {port}; on an iPhone, open a share "
+                      f"sheet or receive something to wake sharingd", file=sys.stderr)
+                return 3
 
-    items = args.url or args.files
-    what = items[0] if len(items) == 1 else (f"{len(items)} links" if args.url else f"{len(items)} files")
-    print(f"sending {what} to {mac} at {target}", file=sys.stderr)
-    return subprocess.run(cmd).returncode
+        items = args.url or args.files
+        what = items[0] if len(items) == 1 else (f"{len(items)} links" if args.url else f"{len(items)} files")
+        print(f"sending {what} to {mac} at {target}", file=sys.stderr)
+        return subprocess.run(cmd).returncode
 
 
 if __name__ == "__main__":
