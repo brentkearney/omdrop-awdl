@@ -495,7 +495,12 @@ def peer_names(macs, port, sender_name, with_wake=True, on_result=None, rescan=N
                 return pool.submit(peer_name, m, port, sender_name, ready_by=ready_by)
             pending = {ask(m): m for m in macs}
             asked = set(macs)
-            while pending:
+            # An empty table is no reason to stop while the wake is up: an
+            # Android phone in Quick Share receive mode joins AWDL only once it
+            # hears that wake, so it can't be in the table before the lookup.
+            while pending or (rescan and ready_by is not None and time.monotonic() < ready_by):
+                if not pending:
+                    time.sleep(RESCAN_SECONDS)
                 done, _ = concurrent.futures.wait(
                     pending, timeout=RESCAN_SECONDS if rescan else None,
                     return_when=concurrent.futures.FIRST_COMPLETED)
@@ -568,7 +573,8 @@ def main():
         print(e, file=sys.stderr)
         return 4
     if args.list:
-        if not heard:
+        # With names and a wake, an empty table is where the lookup starts.
+        if not heard and not (args.names and args.wake):
             print("no devices found: nothing nearby is advertising. "
                   "A window has to be open for the peer watcher to fill this.")
             return 1
