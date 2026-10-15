@@ -102,7 +102,7 @@ set -uo pipefail
 RUN={self.run} IF=awdl0 LIB=/nonexistent CONF=/nonexistent ADV_FLAGS=0
 ADV_COUNT=1 ADV_INTERVAL=30
 log(){{ :; }}; spawn(){{ :; }}; python3(){{ :; }}; ip(){{ :; }}
-track_election(){{ :; }}; rx_watch(){{ :; }}; mdns_reclaim(){{ :; }}
+track_election(){{ :; }}; rx_watch(){{ :; }}; mdns_reclaim(){{ :; }}; radio_tick(){{ :; }}
 kill_children(){{ :; }}; is_duration(){{ :; }}; is_uint(){{ [[ $1 =~ ^[0-9]+$ ]]; }}
 now(){{ date +%s; }}
 {supervise}
