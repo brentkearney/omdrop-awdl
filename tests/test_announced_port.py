@@ -128,6 +128,23 @@ class AnnouncedPortTests(unittest.TestCase):
         self.assertIn(ANDROID, out)
         self.assertIn("Kerem S24 Ultra", out)
 
+    def test_a_names_listing_whose_peers_all_answer_returns_before_the_wake_ends(self):
+        reads = []
+        self.stp.peers = lambda: reads.append(1) or [(ANDROID, None)]
+        self.stp.peer_name = lambda mac, port, name, ready_by=None: "Kerem S24 Ultra"
+
+        @contextlib.contextmanager
+        def wake(seconds=30, purpose=""):
+            yield time.monotonic() + 3
+        self.stp.wake = wake
+        self.stp.RESCAN_SECONDS = 0.05
+        t0 = time.monotonic()
+        rc, out = self.main("--list", "-n")
+        self.assertEqual(rc, 0)
+        self.assertIn("Kerem S24 Ultra", out)
+        self.assertLess(time.monotonic() - t0, 1.0)
+        self.assertLessEqual(len(reads), 2)
+
     def test_an_empty_table_without_names_still_says_nothing_is_there(self):
         self.stp.peers = lambda: []
         rc, _ = self.main("--list")
@@ -137,7 +154,7 @@ class AnnouncedPortTests(unittest.TestCase):
     def test_android_keeps_the_wake_up_from_before_the_send_until_it_ends(self):
         rc, _ = self.main("--mac", ANDROID, "f", "--wait", "30")   # receiver already open
         self.assertEqual(rc, 0)
-        self.assertEqual(self.events, [("wake up", self.stp.SEND_WAKE_SECONDS),
+        self.assertEqual(self.events, [("wake up", 30 + self.stp.SEND_WAKE_SECONDS),
                                        ("knock", 35471), ("send",), ("wake down",)])
 
     def test_android_gets_one_wake_for_the_wait_and_the_send(self):
@@ -146,6 +163,33 @@ class AnnouncedPortTests(unittest.TestCase):
         self.assertEqual(self.names().count("wake up"), 1)
         self.assertLess(self.names().index("wake up"), self.names().index("knock"))
         self.assertGreater(self.names().index("wake down"), self.names().index("send"))
+
+    def test_a_port_announced_during_the_wait_is_dialled_and_gets_the_send_wake(self):
+        # The phone is in the table before its port line: the first read has
+        # no port, a later one does.
+        self.stp.PORTS = {}
+        reads = iter([{}, {ANDROID: 35471}])
+
+        def peers():
+            self.stp.PORTS = next(reads, {ANDROID: 35471})
+            return [(ANDROID, None)]
+        self.stp.peers = peers
+        self.stp.RESCAN_SECONDS = 0
+        sent = []
+        self.stp.subprocess = types.SimpleNamespace(
+            run=lambda cmd, **kw: sent.append(cmd) or types.SimpleNamespace(returncode=0))
+        rc, _ = self.main("--mac", ANDROID, "f", "--wait", "30",
+                          listening=(False, False, False, True))
+        self.assertEqual(rc, 0)
+        self.assertTrue(sent[0][3].endswith("%awdl0]:35471"))
+        self.assertEqual([e for e in self.events if e[0] == "knock"][-1], ("knock", 35471))
+        wakes = [e for e in self.events if e[0] == "wake up"]
+        self.assertEqual(wakes[0], ("wake up", 30))            # the Apple-style wait wake
+        self.assertGreater(wakes[1][1], self.stp.SEND_WAKE_SECONDS)
+        # The wait wake is down before the send wake goes up; the send wake is
+        # still up when the sender runs (it drops only after main returns).
+        self.assertLess(self.events.index(("wake down",)), self.events.index(wakes[1]))
+        self.assertEqual(self.names().count("wake down"), 2)
 
     def test_android_without_wake_raises_none(self):
         self.assertEqual(self.main("--mac", ANDROID, "f", "--no-wake")[0], 0)
