@@ -145,6 +145,46 @@ class AnnouncedPortTests(unittest.TestCase):
         self.assertLess(time.monotonic() - t0, 1.0)
         self.assertLessEqual(len(reads), 2)
 
+    def test_a_names_listing_nobody_joins_says_so_and_fails(self):
+        self.stp.peers = lambda: []
+
+        @contextlib.contextmanager
+        def wake(seconds=30, purpose=""):
+            yield time.monotonic() + 0.2
+        self.stp.wake = wake
+        self.stp.RESCAN_SECONDS = 0.05
+        rc, out = self.main("--list", "-n", "--stream")
+        self.assertEqual(rc, 1)
+        self.assertIn("no devices found", out)
+
+    def test_a_send_by_name_follows_a_port_announced_after_the_first_read(self):
+        # The first two reads have the phone but not its port.
+        self.stp.PORTS = {}
+        reads = iter([{}, {}])
+
+        def peers():
+            self.stp.PORTS = next(reads, {ANDROID: 35471})
+            return [(ANDROID, None)]
+        self.stp.peers = peers
+        self.stp.RESCAN_SECONDS = 0.05
+
+        # Like _knock: the phone answers only once PORTS holds its port.
+        def ask(mac, port, name, ready_by=None):
+            while time.monotonic() < ready_by:
+                if self.stp.PORTS.get(mac) == 35471:
+                    return "Kerem S24 Ultra"
+                time.sleep(0.01)
+            return None
+        self.stp.peer_name = ask
+
+        @contextlib.contextmanager
+        def wake(seconds=30, purpose=""):
+            yield time.monotonic() + 1
+        self.stp.wake = wake
+        rc, out = self.main("--mac", "S24", "--print", "f")
+        self.assertEqual(rc, 0)
+        self.assertIn("%awdl0]:35471", out)
+
     def test_an_empty_table_without_names_still_says_nothing_is_there(self):
         self.stp.peers = lambda: []
         rc, _ = self.main("--list")

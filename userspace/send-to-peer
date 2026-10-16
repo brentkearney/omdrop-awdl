@@ -576,13 +576,28 @@ def main():
     except HelperFailed as e:
         print(e, file=sys.stderr)
         return 4
+    rssi_of = dict(heard)
+
+    # Re-read the table during a lookup: it finds peers that joined after it
+    # started, and refreshes PORTS, which _knock reads, for a peer whose port
+    # reached the table after the peer did. A failed read is not a reason to
+    # stop naming the peers already heard; it just finds nothing new this time.
+    def rescan():
+        try:
+            now = peers()
+        except HelperFailed:
+            return []
+        for m, r in now:
+            rssi_of.setdefault(m, r)
+        return [m for m, _ in now]
+
+    nobody = ("no devices found: nothing nearby is advertising. "
+              "A window has to be open for the peer watcher to fill this.")
     if args.list:
         # With names and a wake, an empty table is where the lookup starts.
         if not heard and not (args.names and args.wake):
-            print("no devices found: nothing nearby is advertising. "
-                  "A window has to be open for the peer watcher to fill this.")
+            print(nobody)
             return 1
-        rssi_of = dict(heard)
 
         def row(mac, got=None, named=False):
             line = f"{mac}  {signal(rssi_of.get(mac))}  [{link_local(mac)}%{IFACE}]:{PORTS.get(mac, args.port)}"
@@ -605,22 +620,14 @@ def main():
                 print(row(mac))
             return 0
 
-        # A table read that fails mid-lookup is not a reason to stop naming
-        # the peers already heard; it just finds no newcomers this time.
-        def rescan():
-            try:
-                now = peers()
-            except HelperFailed:
-                return []
-            for m, r in now:
-                rssi_of.setdefault(m, r)
-            return [m for m, _ in now]
-
         # --stream prints each row the moment its answer is in. Without it the
         # whole listing comes at the end, in signal order, as it always has.
         report = (lambda m, n: print(row(m, n, True), flush=True)) if args.stream else None
         names = peer_names([m for m, _ in heard], args.port, args.name, args.wake,
                            on_result=report, rescan=rescan)
+        if not names:
+            print(nobody)
+            return 1
         if not args.stream:
             order = [m for m, _ in heard] + [m for m in names if m not in dict(heard)]
             for mac in order:
@@ -649,7 +656,7 @@ def main():
             # makes it opt-in. Here it is not optional: resolving the name IS
             # the request. It also works precisely when it matters, because a
             # device can only receive the file if it is already listening.
-            names = peer_names(known, args.port, args.name, args.wake)
+            names = peer_names(known, args.port, args.name, args.wake, rescan=rescan)
             matches = [m for m, n in names.items() if n and want in n.lower()]
             if not matches:
                 named = {m: n for m, n in names.items() if n}
@@ -674,8 +681,7 @@ def main():
     elif len(heard) == 1:
         mac = heard[0][0]
     elif not heard:
-        print("no devices found: nothing nearby is advertising. "
-              "A window has to be open for the peer watcher to fill this.", file=sys.stderr)
+        print(nobody, file=sys.stderr)
         return 2
     else:
         print("several peers heard; choose one with --mac:", file=sys.stderr)
