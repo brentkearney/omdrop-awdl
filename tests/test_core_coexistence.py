@@ -122,6 +122,14 @@ CORE_UID={os.getuid() if owner is None else owner}
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertEqual(result.stdout.split(), [str(core.pid)])
 
+    def test_a_process_gone_mid_scan_prints_nothing(self):
+        # /proc/[0-9]* is globbed before each entry is read, so a process can
+        # exit in between. That is a normal "no", not an error for status to
+        # print.
+        result = self.harness(f"is_core_supervisor {self.root}/gone")
+        self.assertEqual(result.returncode, 1)
+        self.assertEqual(result.stderr, "")
+
     def test_core_supervisor_must_run_as_root(self):
         # As shipped, CORE_UID is 0, and the tester's process is not root's.
         self.core_supervisor()

@@ -306,7 +306,9 @@ CORE_UID=0
 is_core_supervisor(){
   local key= real= eff= _
   local -a argv=()
-  mapfile -d '' -t argv < "$1/cmdline" 2>/dev/null || return 1
+  # 2>/dev/null first: redirections apply left to right, so a process that
+  # exits between the glob and this read would report its failed < itself.
+  mapfile -d '' -t argv 2>/dev/null < "$1/cmdline" || return 1
   [[ ${argv[0]:-} == "$CORE_RADIO" && ${argv[1]:-} == __supervise ]] || return 1
   while read -r key real eff _; do
     [[ $key == Uid: ]] && break
