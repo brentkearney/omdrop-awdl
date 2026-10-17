@@ -121,15 +121,21 @@ supervise 0 0
         # Any local user can start a process whose argv contains `$SELF
         # __supervise` and ignore TERM. supervisor_pids must require the
         # supervisor's real UID (0 in production), or stop waits 10 s for the
-        # look-alike and logs that a supervisor ignored TERM.
+        # look-alike, kills it, and logs that a supervisor ignored TERM.
+        ready = self.run / "lookalike-ready"
         self.helper.write_text(
             "#!/usr/bin/env bash\n"
             "trap '' TERM\n"
+            f"touch {ready}\n"
             "sleep 30\n")
         lookalike = self.spawn("__supervise", "0", "0")
+        # The TERM below must reach the look-alike after its trap is in place.
+        deadline = time.monotonic() + 5
+        while not ready.exists():
+            self.assertLess(time.monotonic(), deadline, "look-alike never started")
+            time.sleep(0.01)
         supervisor_uid = None if os.getuid() != 0 else 65534
 
-        started = time.monotonic()
         result = self.run_fragment(
             f"supervisor_pids; kill -TERM {lookalike.pid}; wait_supervisors_gone",
             supervisor_uid=supervisor_uid,
@@ -137,7 +143,6 @@ supervise 0 0
 
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertEqual(result.stdout.strip(), "")
-        self.assertLess(time.monotonic() - started, 1.0)
         self.assertIsNone(lookalike.poll())
 
 
