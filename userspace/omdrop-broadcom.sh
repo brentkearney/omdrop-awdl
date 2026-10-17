@@ -44,9 +44,14 @@ need_root(){ [[ $EUID -eq 0 ]] || die 2 "needs root: pkexec $0 $*"; }
 # could then plant `pids` (root signals every pid it names) or a link where
 # root opens a file by name (security review, RADIO-RUNDIR-TRUST). /run is a
 # tmpfs, so such a directory lasts until reboot, across a package upgrade.
-# Repaired here: never through a link, links and entries root did not create
-# removed, group and other write taken away. "Root" is whoever runs this:
-# uid 0 in the field, the tester in the tests.
+# Repaired here: never through a link, group and other write taken from the
+# directory, and every entry that is a link, not root's, or writable by group
+# or other removed. Contents anyone could have rewritten are not trusted after
+# a chmod: a 0666 `pids` edited to name an unrelated root process would be
+# killed by the next teardown. A 0.9.x window started under umask 000 loses its
+# state with them, and children recorded only in its `pids` are no longer
+# stopped for it; accepted, since that state is exactly what was untrusted.
+# "Root" is whoever runs this: uid 0 in the field, the tester in the tests.
 run_dir(){
   local bad
   # /run is root's, so a link in place of the directory is not ours to follow.
@@ -58,10 +63,9 @@ run_dir(){
   [[ -n $bad ]] || return 0
   [[ -O $RUN ]] || chown -h -- "$EUID" "$RUN" || return 1
   chmod go-w -- "$RUN" || return 1
-  find "$RUN" -mindepth 1 -maxdepth 1 \( -type l -o ! -user "$EUID" \) -exec rm -rf -- {} + \
-    || return 1
-  find "$RUN" -mindepth 1 -maxdepth 1 -perm /022 -exec chmod go-w -- {} + || return 1
-  log "repaired $RUN: it was writable by others, or held links or files root did not create"
+  find "$RUN" -mindepth 1 -maxdepth 1 \( -type l -o ! -user "$EUID" -o -perm /022 \) \
+    -exec rm -rf -- {} + || return 1
+  log "repaired $RUN: took group and other write away, removed links and entries others owned or could write"
 }
 # need_run_dir: run_dir, or stop before root writes anything. Not die: its log
 # would append to the very directory that could not be trusted.

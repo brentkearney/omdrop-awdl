@@ -81,7 +81,7 @@ class CoexistenceTests(unittest.TestCase):
 
     def harness(self, body, *names, owner=None):
         lib = BROADCOM.read_text()
-        fragments = "\n".join(function(lib if n in ("is_uint", "is_duration") else self.source, n)
+        fragments = "\n".join(function(lib if n in ("is_uint", "is_duration", "run_dir") else self.source, n)
                               for n in names)
         script = f'''set -uo pipefail
 RUN={self.run_dir}
@@ -180,6 +180,27 @@ CORE_UID={os.getuid() if owner is None else owner}
         self.assertIn("(a) b ()", Path(f"/proc/{process.pid}/stat").read_text())
         result = self.harness(f"start_time {process.pid}", "start_time")
         self.assertEqual(result.stdout, start_time(process.pid))
+
+    def test_repair_discards_a_pids_file_others_could_have_rewritten(self):
+        # An older helper under umask 000 left `pids` 0666 (the tester stands
+        # in for root as its owner). Anyone could have replaced our line with a
+        # bare pid naming an unrelated root process: no start time, so
+        # kill_children would signal whatever has that pid.
+        unrelated = subprocess.Popen(["sleep", "30"])
+        self.processes.append(unrelated)
+        pids = self.run_dir / "pids"
+        pids.write_text(f"{unrelated.pid} mdns\n")
+        pids.chmod(0o666)
+        kept = self.run_dir / "until"
+        kept.write_text("0")
+        kept.chmod(0o644)
+        result = self.harness("run_dir && kill_children",
+                              "run_dir", "kill_children", "start_time", "same_process")
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn("repaired", result.stderr)
+        self.assertFalse(pids.exists())
+        self.assertIsNone(unrelated.poll(), "a pid from an untrusted pids file was signalled")
+        self.assertEqual(kept.read_text(), "0")
 
 
 class DispatchTests(unittest.TestCase):

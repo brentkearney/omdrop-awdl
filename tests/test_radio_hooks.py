@@ -437,6 +437,9 @@ class RunDirTests(HookHarness):
         state = self.run_dir / "election.state"
         state.write_text("x\n")
         state.chmod(0o666)
+        kept = self.run_dir / "identity.state"
+        kept.write_text("y\n")
+        kept.chmod(0o644)
         # Links where root used to open files by name.
         for name in ("log", "pids", "payload.bin", "read.awdl_stats.bin"):
             (self.run_dir / name).symlink_to(victim)
@@ -445,7 +448,9 @@ class RunDirTests(HookHarness):
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertIn("repaired", result.stderr)
         self.assertEqual(self.mode(self.run_dir), 0o755)
-        self.assertEqual(self.mode(state), 0o644)
+        # Anyone could have rewritten it, so it goes rather than being trusted.
+        self.assertFalse(state.exists())
+        self.assertEqual(kept.read_text(), "y\n")
         self.assertEqual([p.name for p in self.run_dir.iterdir() if p.is_symlink()], [])
         self.assertEqual(victim.read_text(), "precious\n")
 
