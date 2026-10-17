@@ -73,16 +73,21 @@ class AnnouncedPortTests(unittest.TestCase):
     def names(self):
         return [e[0] for e in self.events]
 
-    def test_the_table_read_takes_ports_from_the_helper_and_drops_them_with_it(self):
+    def test_the_table_read_keeps_a_port_while_its_peer_stays_and_drops_it_with_the_peer(self):
         stp = load_sender()
         out = types.SimpleNamespace(
             returncode=0, stdout=f"{ANDROID} rssi=? port=35471\n{APPLE} rssi=?\n", stderr="")
         stp.subprocess = types.SimpleNamespace(run=lambda *a, **k: out)
-        stp.registered_peers = lambda: [ANDROID, APPLE]
+        registered = [ANDROID, APPLE]
+        stp.registered_peers = lambda: registered
         stp.own_address = lambda: None
         stp.peers()
         self.assertEqual(stp.PORTS, {ANDROID: 35471})
-        out.stdout = f"{ANDROID} rssi=?\n"   # a helper that announces no ports
+        out.stdout = f"{ANDROID} rssi=?\n"   # a read that misses the port line
+        stp.peers()
+        self.assertEqual(stp.PORTS, {ANDROID: 35471})
+        out.stdout = ""                      # the phone has left
+        registered[:] = [APPLE]
         stp.peers()
         self.assertEqual(stp.PORTS, {})
 
