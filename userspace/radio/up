@@ -1,0 +1,27 @@
+#!/usr/bin/env bash
+# Radio backend hook `up` (omdrop-core's docs/backend-contract.md), Broadcom:
+# make awdl0 exist, prove the firmware transmits (the data-path gate), and wait
+# for its link-local address. Core calls it once per `start`, holding the start
+# lock, and records the window's reason and receive baseline itself.
+#
+# Exit 0: awdl0 is up, transmitting, with a link-local address.
+#      2: usage, or not root.
+#      3: the data path is parked; the last stderr line says whether retrying
+#         helps.
+#      4: no awdl0, or the driver is not loaded.
+# stdout stays empty: Broadcom keeps core's default announcer and mDNS.
+set -uo pipefail
+# pkexec and core may hand us any umask; what this creates in the run
+# directory must be writable by root alone.
+umask 022
+# The library and the Python helpers sit one directory up: /usr/lib/omdrop when
+# packaged. Resolved from our own realpath, never the working directory.
+LIB="$(cd "$(dirname "$(readlink -f "$0")")/.." && pwd)"
+# shellcheck source=../omdrop-broadcom.sh
+. "$LIB/omdrop-broadcom.sh" || { echo "$0: cannot read $LIB/omdrop-broadcom.sh" >&2; exit 2; }
+hook_mode
+(( $# == 0 )) || die 2 "usage: $0"
+need_root up
+need_run_dir
+radio_up
+exit 0

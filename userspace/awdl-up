@@ -59,9 +59,17 @@ PCH=$(cat "$CONF/peer-chan"   2>/dev/null || echo 44)
 SHAPE=$(cat "$CONF/chan-shape" 2>/dev/null || echo dense)
 
 log(){ printf '%s %s\n' "$(date -u +%H:%M:%SZ)" "$*"; }
-iovar_set(){ timeout 8 python3 "$LIB/brcm_iovar.py" -i "$1" set "$2" "$3" >/dev/null 2>&1; }
+# Every timeout here is `timeout --foreground`, for the reason given at
+# iovar_set in omdrop-broadcom.sh (HOOK-TIMEOUT-PGRP-ESCAPE): the `up` hook
+# runs this to rebuild awdl0, and a plain timeout moves itself and its child
+# into a process group of their own, which the group signal omdrop-core sends
+# a cancelled hook misses -- an interface create or SET could then land after
+# the cancel. brcm_iovar.py starts no children, so --foreground, which only
+# stops timing out the child's own children, loses nothing. At boot nothing
+# changes either: awdl0.service stops the unit's whole cgroup on its timeout.
+iovar_set(){ timeout --foreground 8 python3 "$LIB/brcm_iovar.py" -i "$1" set "$2" "$3" >/dev/null 2>&1; }
 iovar_bytes(){ local out=/run/awdl-up.readback; rm -f "$out"
-                timeout 8 python3 "$LIB/brcm_iovar.py" -i "$IF" get "$1" -l "$2" \
+                timeout --foreground 8 python3 "$LIB/brcm_iovar.py" -i "$IF" get "$1" -l "$2" \
                   --raw "$out" >/dev/null 2>&1
                 stat -c %s "$out" 2>/dev/null || echo 0; }
 # 1 while AWDL is enabled. A window is live then, and the schedule iovars are
@@ -134,7 +142,7 @@ regdom_report(){
   # The station interface, not awdl0: this runs mid-reload, before awdl0 has
   # been created, and the country is a per-radio setting either way.
   rm -f "$out"
-  if timeout 8 python3 "$LIB/brcm_iovar.py" -i "$STA" get country -l 12 \
+  if timeout --foreground 8 python3 "$LIB/brcm_iovar.py" -i "$STA" get country -l 12 \
        --raw "$out" >/dev/null 2>&1 && [[ -s $out ]]; then
     cc=$(head -c 2 "$out" | tr -d '\0')
     rev=$(od -An -tu4 -j4 -N4 "$out" | tr -d ' ')
@@ -260,7 +268,7 @@ if ! wait_permaddr; then
 fi
 
 log "creating $IF from $STA"
-timeout 20 python3 "$LIB/brcm_iovar.py" -i "$STA" awdl-if create 2>&1 | sed 's/^/  /'
+timeout --foreground 20 python3 "$LIB/brcm_iovar.py" -i "$STA" awdl-if create 2>&1 | sed 's/^/  /'
 sleep 2
 ip link show "$IF" >/dev/null 2>&1 || { log "awdl-if create did not produce $IF"; exit 4; }
 ip link set "$IF" up

@@ -1,0 +1,19 @@
+#!/usr/bin/env bash
+# Radio backend hook `diag [seconds]` (omdrop-core's docs/backend-contract.md),
+# Broadcom: the firmware's schedule and sync master, and two awdl_stats
+# snapshots <seconds> apart (default 15, at most 600). Read-only: GETs only.
+#
+# Exit 0: report printed.
+#      2: usage, or not root.
+set -uo pipefail
+# pkexec and core may hand us any umask; what this creates in the run
+# directory must be writable by root alone.
+umask 022
+# The library and the Python helpers sit one directory up: /usr/lib/omdrop when
+# packaged. Resolved from our own realpath, never the working directory.
+LIB="$(cd "$(dirname "$(readlink -f "$0")")/.." && pwd)"
+# shellcheck source=../omdrop-broadcom.sh
+. "$LIB/omdrop-broadcom.sh" || { echo "$0: cannot read $LIB/omdrop-broadcom.sh" >&2; exit 2; }
+hook_mode
+(( $# <= 1 )) || die 2 "usage: $0 [seconds, at most 600]"
+cmd_diag "$@"

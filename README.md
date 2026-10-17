@@ -53,6 +53,8 @@ On a kernel whose own `brcmfmac` already has this AWDL support, DKMS skips the b
 |---|---|
 | `/usr/src/brcmfmac-awdl-<ver>/` | Patched `brcmfmac` sources, built by DKMS for every kernel |
 | `/usr/lib/omdrop/omdrop-discoverable` | Opens and closes a bounded discoverability window |
+| `/usr/lib/omdrop/omdrop-broadcom.sh` | The Broadcom side of `omdrop-discoverable` (data-path check, AWDL identity, diagnostics), shared with the hooks below |
+| `/usr/lib/omdrop/radio/` | Radio backend hooks for omdrop-core's root helper (`probe`, `up`, `identity`, `tick`, `peer-watch`, `peers`, `diag`, `read`, `trace`); unused until omdrop-core is installed |
 | `/usr/lib/omdrop/awdl-up` | Creates and configures `awdl0`; run at boot by `awdl0.service` |
 | `/usr/lib/omdrop/send-to-peer` | Lists peers and sends files to one |
 | `/usr/lib/omdrop/airdrop-send.py` | The sender: `/Discover`, `/Ask`, and `/Upload` over TLS on `awdl0` |

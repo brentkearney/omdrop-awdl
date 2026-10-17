@@ -1,0 +1,25 @@
+#!/usr/bin/env bash
+# Radio backend hook `identity` (omdrop-core's docs/backend-contract.md),
+# Broadcom: write this machine's AWDL identity to the firmware -- election
+# metric and RSSI thresholds, the PSF template, the _airdrop._tcp service TLVs
+# (awdl_afs_pload, with the BCM4388 header fallback) and aftxmode. Core calls
+# it once, after `up` succeeded and before the window opens.
+#
+# Exit 0: done. A write the firmware rejects is logged, not fatal, as it always
+#         was in omdrop-discoverable.
+#      2: usage, or not root.
+set -uo pipefail
+# pkexec and core may hand us any umask; what this creates in the run
+# directory must be writable by root alone.
+umask 022
+# The library and the Python helpers sit one directory up: /usr/lib/omdrop when
+# packaged. Resolved from our own realpath, never the working directory.
+LIB="$(cd "$(dirname "$(readlink -f "$0")")/.." && pwd)"
+# shellcheck source=../omdrop-broadcom.sh
+. "$LIB/omdrop-broadcom.sh" || { echo "$0: cannot read $LIB/omdrop-broadcom.sh" >&2; exit 2; }
+hook_mode
+(( $# == 0 )) || die 2 "usage: $0"
+need_root identity
+need_run_dir
+write_identity
+exit 0

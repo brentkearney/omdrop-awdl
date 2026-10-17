@@ -1,0 +1,26 @@
+#!/usr/bin/env bash
+# Radio backend hook `tick <seq>` (omdrop-core's docs/backend-contract.md),
+# Broadcom: once per supervision interval, re-assert awdl0 if it lost its
+# link-local, and rewrite the PSF template when the firmware's election has
+# moved (seen twice in a row; state in $RUN/election.*). <seq> numbers the
+# interval from 1; Broadcom needs only to check it.
+#
+# Exit 0: nothing to do, or the template was rewritten.
+#      1: the firmware rejected the template rewrite; it is retried next tick.
+#      2: usage, or not root.
+set -uo pipefail
+# pkexec and core may hand us any umask; what this creates in the run
+# directory must be writable by root alone.
+umask 022
+# The library and the Python helpers sit one directory up: /usr/lib/omdrop when
+# packaged. Resolved from our own realpath, never the working directory.
+LIB="$(cd "$(dirname "$(readlink -f "$0")")/.." && pwd)"
+# shellcheck source=../omdrop-broadcom.sh
+. "$LIB/omdrop-broadcom.sh" || { echo "$0: cannot read $LIB/omdrop-broadcom.sh" >&2; exit 2; }
+hook_mode
+# Canonical decimal, 1 to 19 digits: the contract's 1 to 2^63-1. Never used
+# in arithmetic here.
+(( $# == 1 )) && [[ $1 =~ ^[1-9][0-9]{0,18}$ ]] || die 2 "usage: $0 <seq>"
+need_root tick
+need_run_dir
+radio_tick

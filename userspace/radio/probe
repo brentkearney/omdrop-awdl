@@ -1,0 +1,43 @@
+#!/usr/bin/env bash
+# Radio backend hook `probe --json` (omdrop-core's docs/backend-contract.md),
+# Broadcom: what this backend is and what stands in its way, for `omdrop
+# doctor` and for core's `start`. Runs without root and changes nothing.
+#
+# hardware: an Apple Broadcom Wi-Fi chip -- brcmfmac loaded, or a Broadcom
+#   (0x14e4) network controller (class 0x0280) on PCI without the driver.
+# missing: why discovery cannot work now, the most fundamental first.
+#
+# Exit 0: the JSON object on stdout.
+#      2: usage.
+set -uo pipefail
+# Creates nothing, but every hook starts from a known umask, whatever its
+# caller had.
+umask 022
+# The package version, written in by the PKGBUILD at install. The helper
+# contract omdrop-plugin compares (PR #25) is the package version as well.
+VERSION=@VERSION@
+# Read-only, so it may follow core's test seam: core passes the variable to
+# hooks only while it runs unprivileged and honours it itself.
+SYS=${OMDROP_RADIO_TEST_ROOT:-}/sys
+
+[[ $# == 1 && $1 == --json ]] || { echo "usage: $0 --json" >&2; exit 2; }
+
+driver=false hardware=false
+[[ -d $SYS/module/brcmfmac ]] && driver=true hardware=true
+if [[ $hardware == false ]]; then
+  for dev in "$SYS"/bus/pci/devices/*; do
+    if [[ $(cat "$dev/vendor" 2>/dev/null) == 0x14e4 && $(cat "$dev/class" 2>/dev/null) == 0x0280* ]]; then
+      hardware=true
+      break
+    fi
+  done
+fi
+
+missing=
+if [[ $hardware == false ]]; then
+  missing='{"id":"hardware","say":"This computer has no Apple Broadcom Wi-Fi, which this radio backend drives: it runs only on Apple Silicon Macs."}'
+elif [[ $driver == false ]]; then
+  missing='{"id":"radio","say":"AirDrop'"'"'s Wi-Fi driver is not loaded. Restart to load it."}'
+fi
+printf '{"backend":"awdl","version":"%s","contract":"%s","hooks":1,"hardware":%s,"missing":[%s]}\n' \
+  "$VERSION" "$VERSION" "$hardware" "$missing"

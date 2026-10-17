@@ -1,0 +1,26 @@
+#!/usr/bin/env bash
+# Radio backend hook `peer-watch` (omdrop-core's docs/backend-contract.md),
+# Broadcom: keep the firmware's peer table registered for every AWDL peer
+# heard. Runs for the whole window; core starts it with the other advertising
+# children and stops it with SIGTERM.
+#
+# Peer registration is what makes our SYN-ACKs leave the radio: unicast to a
+# MAC with no firmware peer entry completes 0x0003 FW_TOSSED (074311Z). exec, so
+# the SIGTERM reaches the watcher itself, which frees its firmware slots on it.
+#
+# Exit 2: usage, or not root. Otherwise the watcher's own status.
+set -uo pipefail
+# pkexec and core may hand us any umask; what this creates in the run
+# directory must be writable by root alone.
+umask 022
+# The library and the Python helpers sit one directory up: /usr/lib/omdrop when
+# packaged. Resolved from our own realpath, never the working directory.
+LIB="$(cd "$(dirname "$(readlink -f "$0")")/.." && pwd)"
+# shellcheck source=../omdrop-broadcom.sh
+. "$LIB/omdrop-broadcom.sh" || { echo "$0: cannot read $LIB/omdrop-broadcom.sh" >&2; exit 2; }
+hook_mode
+(( $# == 0 )) || die 2 "usage: $0"
+need_root peer-watch
+# The watcher writes peerop.degraded into the run directory.
+need_run_dir
+exec python3 "$LIB/awdl-peer-watch.py" --iface "$IF" --only ""
