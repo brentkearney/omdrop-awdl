@@ -43,6 +43,7 @@ export OMDROP_CONF="$CONF"
 IF=awdl0
 RUN=/run/awdl-discoverable
 LOG=$RUN/log
+SUPERVISOR_UID=0
 # How many awdl=0/1 cycles to spend fighting a parked data path. Each costs
 # ~40 s. The park is ~50% per enable and streaky, so 3 is the point where the
 # expected failure rate (~1 in 8) stops improving faster than the user's
@@ -680,15 +681,28 @@ supervisor_pid(){ cat "$RUN/supervisor" 2>/dev/null; }
 # small grep replacement does not search those NUL-separated procfs files, so
 # the old predicate declared every successfully spawned supervisor dead. Each
 # retry then created another supervisor while the caller reported failure.
+#
+# Match only processes whose real UID is root's (SUPERVISOR_UID). Any local
+# user can start a process whose argv contains "$SELF __supervise" and ignore
+# TERM; matching it would let that process hold `stop` in wait_supervisors_gone
+# for the full 10 s and log that a supervisor ignored TERM. Read the real UID
+# from /proc/<pid>/status rather than stat'ing /proc/<pid>: the directory carries
+# the effective UID, and `status` runs as the unprivileged user so `[[ -O ]]`
+# would reject the root supervisor.
 supervisor_pids(){
-  local proc i
+  local proc i k ruid _
   local -a argv=()
   for proc in /proc/[0-9]*; do
     argv=()
-    mapfile -d '' -t argv < "$proc/cmdline" 2>/dev/null || continue
+    mapfile -d '' -t argv 2>/dev/null < "$proc/cmdline" || continue
     for (( i = 0; i + 1 < ${#argv[@]}; i++ )); do
       if [[ ${argv[i]} == "$SELF" && ${argv[i + 1]} == __supervise ]]; then
-        printf '%s\n' "${proc##*/}"
+        while IFS=$'\t ' read -r k ruid _; do
+          if [[ $k == Uid: ]]; then
+            [[ $ruid == "${SUPERVISOR_UID:-0}" ]] && printf '%s\n' "${proc##*/}"
+            break
+          fi
+        done 2>/dev/null < "$proc/status"
         break
       fi
     done
