@@ -99,12 +99,13 @@ fwerr(){ dmesg | grep -o "firmware error -\?[0-9]*" | tail -1 | grep -o '\-\?[0-
 # /dev/null: 05:3xZ an awdl_payload SET was rejected on every window of the
 # night and nothing said why. Keep stdout for the caller to log.
 #
-# `timeout --foreground` here and for awdl-up: plain timeout moves itself and
-# its child into a process group of their own, so the group SIGTERM/SIGKILL
-# omdrop-core sends a cancelled or overdue hook missed them, and a SET could
-# land after `stop` had reported the radio off (security review,
-# HOOK-TIMEOUT-PGRP-ESCAPE). Both are single processes, so --foreground, which
-# only stops timing out the child's own children, loses nothing.
+# `timeout --foreground` here, for awdl-up, and inside awdl-up: plain timeout
+# moves itself and its child into a process group of their own, so the group
+# SIGTERM/SIGKILL omdrop-core sends a cancelled or overdue hook missed them,
+# and a SET or an interface create could land after `stop` had reported the
+# radio off (security review, HOOK-TIMEOUT-PGRP-ESCAPE). --foreground only
+# stops timing out the child's own children. brcm_iovar.py has none; awdl-up's
+# running command outlives an expired awdl-up by at most its own 8 or 20 s.
 iovar_set(){ local out rc; dmesg -C
              out=$(timeout --foreground 8 python3 "$LIB/brcm_iovar.py" -i "$IF" set "$1" "$2" 2>&1); rc=$?
              (( rc == 0 )) || log "iovar_set $1: rc=$rc ${out##*$'\n'}"

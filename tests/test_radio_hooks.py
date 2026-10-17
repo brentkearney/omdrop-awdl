@@ -15,10 +15,13 @@ first on PATH.
 """
 import json
 import os
+import re
 import shutil
+import signal
 import stat
 import subprocess
 import tempfile
+import time
 import unittest
 from pathlib import Path
 
@@ -96,6 +99,19 @@ STUBS = {
              '[[ $1 == -g ]] && cat "$STUB/nm_state" 2>/dev/null\nexit 0\n',
     "systemctl": "#!/usr/bin/env bash\nexit 0\n",
 }
+
+# brcm_iovar.py for awdl-up's `awdl-if create`: records its pid and process
+# group, then lands its write 1.5 s later unless it was stopped first.
+CREATE_SLOWLY = r'''import os, sys, time
+stub = os.environ["STUB"]
+if "awdl-if" in sys.argv:
+    with open(os.path.join(stub, "create.tmp"), "w") as f:
+        f.write(f"{os.getpid()} {os.getpgrp()}\n")
+    os.replace(os.path.join(stub, "create.tmp"), os.path.join(stub, "create.started"))
+    time.sleep(1.5)
+    open(os.path.join(stub, "create.landed"), "w").close()
+sys.exit(1)
+'''
 
 PY_HELPERS = ("awdl-airdrop-adv.py", "awdl-election.py", "awdl-peer-watch.py",
               "awdl-peers.py", "awdl-stats.py", "mkpsf.py", "awdl-up")
@@ -562,6 +578,67 @@ class ProcessGroupTests(HookHarness):
         result = self.hook("up")
         self.assertEqual(result.returncode, 4, result.stderr)
         self.assertEqual(self.log("awdl-up.pgrp").split(), [str(result.pid)])
+
+    def test_every_nested_timeout_keeps_the_callers_group(self):
+        scripts = [USERSPACE / "omdrop-broadcom.sh", USERSPACE / "omdrop-discoverable",
+                   USERSPACE / "awdl-up", *sorted((USERSPACE / "radio").iterdir())]
+        for path in scripts:
+            for n, line in enumerate(path.read_text().splitlines(), 1):
+                if line.lstrip().startswith("#"):
+                    continue
+                with self.subTest(at=f"{path.name}:{n}"):
+                    self.assertIsNone(re.search(r"\btimeout\s+(?!--foreground\b)[-\d]", line), line)
+
+    def test_a_cancelled_rebuild_leaves_nothing_running(self):
+        # The real awdl-up, run by the `up` hook as core runs it: only its root
+        # check and the NetworkManager files it may write are redirected.
+        awdl_up = (USERSPACE / "awdl-up").read_text()
+        for old, new in (("[[ $EUID -eq 0 ]]", "true"),
+                         ("NMCONF_VENDOR=/usr/lib/NetworkManager/conf.d/", f"NMCONF_VENDOR={self.stub}/vendor-"),
+                         ("NMCONF=/etc/NetworkManager/conf.d/", f"NMCONF={self.stub}/")):
+            self.assertIn(old, awdl_up)
+            awdl_up = awdl_up.replace(old, new)
+        executable(self.lib / "awdl-up", awdl_up)
+        executable(self.lib / "brcm_iovar.py", CREATE_SLOWLY)
+        (self.stub / "driver").touch()
+        env = dict(os.environ, STUB=str(self.stub), PATH=f"{self.bin}:{os.environ['PATH']}",
+                   OMDROP_CONF=str(self.root / "conf"), AWDL_STA="wlstub")
+        hook = subprocess.Popen([str(self.lib / "radio" / "up")], stdout=subprocess.DEVNULL,
+                                stderr=subprocess.DEVNULL, env=env, cwd="/", start_new_session=True)
+        self.addCleanup(hook.wait)
+        started = self.stub / "create.started"
+        deadline = time.monotonic() + 30
+        while not started.exists():
+            self.assertIsNone(hook.poll(), "the hook ended before awdl-up created the interface")
+            self.assertLess(time.monotonic(), deadline, "awdl-up never reached the create")
+            time.sleep(0.05)
+        helper, group = map(int, started.read_text().split())
+        self.addCleanup(self.kill_helper, helper)
+        # As core cancels a hook: TERM to its process group, then KILL.
+        os.killpg(hook.pid, signal.SIGTERM)
+        time.sleep(0.2)
+        try:
+            os.killpg(hook.pid, signal.SIGKILL)
+        except ProcessLookupError:
+            pass
+        hook.wait(timeout=10)
+        time.sleep(2)
+        self.assertFalse((self.stub / "create.landed").exists(),
+                         "the interface create landed after the hook was cancelled")
+        self.assertEqual(group, hook.pid, "the firmware helper ran outside the hook's group")
+        self.assertFalse(self.helper_running(helper), "the firmware helper outlived the hook")
+
+    def helper_running(self, pid):
+        try:
+            cmdline = Path(f"/proc/{pid}/cmdline").read_bytes()
+            state = Path(f"/proc/{pid}/stat").read_text().rsplit(")", 1)[1].split()[0]
+        except (FileNotFoundError, ProcessLookupError):
+            return False
+        return state != "Z" and str(self.lib / "brcm_iovar.py").encode() in cmdline
+
+    def kill_helper(self, pid):
+        if self.helper_running(pid):
+            os.kill(pid, signal.SIGKILL)
 
 
 class ProbeTests(unittest.TestCase):
