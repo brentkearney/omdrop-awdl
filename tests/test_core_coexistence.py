@@ -14,6 +14,7 @@ dispatcher tests run the script itself, which refuses at the root check
 before touching anything.
 """
 import os
+import signal
 import subprocess
 import sys
 import tempfile
@@ -27,6 +28,22 @@ DISCOVERABLE = ROOT / "userspace" / "omdrop-discoverable"
 BROADCOM = ROOT / "userspace" / "omdrop-broadcom.sh"
 
 SLEEPER = "import time\ntime.sleep(30)\n"
+
+# omdrop-core's supervisor as far as stop can see it: one child, recorded in a
+# file, and a teardown on TERM that takes a second before stopping the child.
+TEARING_DOWN = '''import os, signal, subprocess, sys, time
+def term(*_):
+    time.sleep(1)
+    child.terminate()
+    child.wait()
+    sys.exit(0)
+signal.signal(signal.SIGTERM, term)
+child = subprocess.Popen(["sleep", "30"])
+with open("child.tmp", "w") as f:
+    f.write(f"{child.pid}\\n")
+os.replace("child.tmp", "child")
+time.sleep(30)
+'''
 
 
 def function(source, name):
@@ -141,6 +158,48 @@ CORE_UID={os.getuid() if owner is None else owner}
         self.assertFalse(marker.exists())
         self.assertEqual((self.run_dir / "until").read_text(), "0")
         self.assertEqual((self.run_dir / "reason").read_text(), "ok")
+
+    def test_stop_ends_a_core_window_before_returning(self):
+        (self.root / "__supervise").write_text(TEARING_DOWN)
+        core = self.core_supervisor()
+        recorded = self.root / "child"
+        deadline = time.monotonic() + 10
+        while not recorded.exists():
+            self.assertLess(time.monotonic(), deadline, "the fake supervisor never started its child")
+            time.sleep(0.05)
+        child = int(recorded.read_text())
+        self.addCleanup(self.kill_sleeper, child)
+        (self.run_dir / "supervisor").write_text(f"{core.pid} {start_time(core.pid)}\n")
+        (self.run_dir / "until").write_text("0")
+        (self.run_dir / "reason").write_text("ok")
+        # pgrep would look for `bash start` across the machine: not ours.
+        stop = self.harness("pgrep(){ :; }; mdns_reclaim(){ :; }; cmd_stop",
+                            "start_time", "same_process", "kill_children", "cmd_stop")
+        self.assertEqual(stop.returncode, 0, stop.stderr)
+        self.assertIsNotNone(core.poll(), "stop returned while omdrop-core's supervisor still ran")
+        self.assertFalse(self.sleeper_running(child), "core's child outlived stop")
+        self.assertFalse((self.run_dir / "until").exists())
+        self.assertEqual((self.run_dir / "reason").read_text(), "stopped")
+        # The next start gets past the window checks to the radio.
+        marker = self.root / "radio_up"
+        start = self.harness(f"radio_up(){{ echo up >> {marker}; exit 0; }}; cmd_start 600",
+                             "is_uint", "is_duration", "start_time", "same_process",
+                             "kill_children", "cmd_start")
+        self.assertEqual(start.returncode, 0, start.stderr)
+        self.assertTrue(marker.exists(), start.stderr)
+
+    @staticmethod
+    def sleeper_running(pid):
+        try:
+            cmdline = Path(f"/proc/{pid}/cmdline").read_bytes()
+            state = Path(f"/proc/{pid}/stat").read_text().rsplit(")", 1)[1].split()[0]
+        except (FileNotFoundError, ProcessLookupError):
+            return False
+        return state != "Z" and cmdline == b"sleep\x0030\x00"
+
+    def kill_sleeper(self, pid):
+        if self.sleeper_running(pid):
+            os.kill(pid, signal.SIGKILL)
 
     def kill_children(self, lines):
         (self.run_dir / "pids").write_text("".join(lines))

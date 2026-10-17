@@ -274,24 +274,25 @@ supervisor_pid(){ local pid _; { read -r pid _ < "$RUN/supervisor"; } 2>/dev/nul
 # from /proc/<pid>/status rather than stat'ing /proc/<pid>: the directory carries
 # the effective UID, and `status` runs as the unprivileged user so `[[ -O ]]`
 # would reject the root supervisor.
-supervisor_pids(){
-  local proc i k ruid _
+is_supervisor(){
+  local i k ruid _
   local -a argv=()
-  for proc in /proc/[0-9]*; do
-    argv=()
-    mapfile -d '' -t argv 2>/dev/null < "$proc/cmdline" || continue
-    for (( i = 0; i + 1 < ${#argv[@]}; i++ )); do
-      if [[ ${argv[i]} == "$SELF" && ${argv[i + 1]} == __supervise ]]; then
-        while IFS=$'\t ' read -r k ruid _; do
-          if [[ $k == Uid: ]]; then
-            [[ $ruid == "${SUPERVISOR_UID:-0}" ]] && printf '%s\n' "${proc##*/}"
-            break
-          fi
-        done 2>/dev/null < "$proc/status"
-        break
-      fi
-    done
+  mapfile -d '' -t argv 2>/dev/null < "$1/cmdline" || return 1
+  for (( i = 0; i + 1 < ${#argv[@]}; i++ )); do
+    [[ ${argv[i]} == "$SELF" && ${argv[i + 1]} == __supervise ]] || continue
+    while IFS=$'\t ' read -r k ruid _; do
+      [[ $k == Uid: ]] && { [[ $ruid == "${SUPERVISOR_UID:-0}" ]]; return; }
+    done 2>/dev/null < "$1/status"
+    return 1
   done
+  return 1
+}
+supervisor_pids(){
+  local proc
+  for proc in /proc/[0-9]*; do
+    is_supervisor "$proc" && printf '%s\n' "${proc##*/}"
+  done
+  return 0
 }
 
 # omdrop-core's root helper runs the same window from the same run directory
@@ -302,20 +303,22 @@ supervisor_pids(){
 # user chose (security review, RADIO-ARGV-PAIR-ANYWHERE).
 CORE_RADIO=/usr/lib/omdrop-core/omdrop-radio
 CORE_UID=0
-core_supervisor_pids(){
-  local proc key real eff _
+is_core_supervisor(){
+  local key= real= eff= _
   local -a argv=()
+  mapfile -d '' -t argv < "$1/cmdline" 2>/dev/null || return 1
+  [[ ${argv[0]:-} == "$CORE_RADIO" && ${argv[1]:-} == __supervise ]] || return 1
+  while read -r key real eff _; do
+    [[ $key == Uid: ]] && break
+  done 2>/dev/null < "$1/status"
+  [[ $key == Uid: && $real == "$CORE_UID" && $eff == "$CORE_UID" ]]
+}
+core_supervisor_pids(){
+  local proc
   for proc in /proc/[0-9]*; do
-    argv=()
-    mapfile -d '' -t argv < "$proc/cmdline" 2>/dev/null || continue
-    [[ ${argv[0]:-} == "$CORE_RADIO" && ${argv[1]:-} == __supervise ]] || continue
-    key= real= eff=
-    while read -r key real eff _; do
-      [[ $key == Uid: ]] && break
-    done 2>/dev/null < "$proc/status"
-    [[ $key == Uid: && $real == "$CORE_UID" && $eff == "$CORE_UID" ]] || continue
-    printf '%s\n' "${proc##*/}"
+    is_core_supervisor "$proc" && printf '%s\n' "${proc##*/}"
   done
+  return 0
 }
 
 # /proc, not `kill -0`: status runs as the unprivileged user and signalling a
@@ -331,12 +334,32 @@ supervisor_alive(){
   return 1
 }
 
+# Every supervisor of the window, ours and omdrop-core's, as `<pid> <start
+# time>`: what `stop` ends.
+window_supervisors(){
+  local p t
+  while read -r p; do
+    t=$(start_time "$p") && [[ -n $t ]] && printf '%s %s\n' "$p" "$t"
+  done < <(supervisor_pids; core_supervisor_pids)
+}
+
+# signal_supervisor <signal> <pid> <start time>: only while the pid is still
+# the process window_supervisors listed -- same start time, still a supervisor
+# by argv and owner -- checked immediately before the signal, so a pid reused
+# since is never signalled.
+signal_supervisor(){
+  [[ -n $3 ]] && same_process "$2" "$3" || return 1
+  is_supervisor "/proc/$2" || is_core_supervisor "/proc/$2" || return 1
+  kill "-$1" "$2" 2>/dev/null
+}
+
 # A TERMed supervisor still runs its teardown (kill_children alone takes a
-# second), so "signalled" is not "gone". Poll until none is left, up to 10 s.
+# second), so "signalled" is not "gone". Poll until none is left, ours or
+# omdrop-core's, up to 10 s.
 wait_supervisors_gone(){
   local i
   for (( i = 0; i < 50; i++ )); do
-    [[ -z $(supervisor_pids) ]] && return 0
+    [[ -z $(supervisor_pids; core_supervisor_pids) ]] && return 0
     sleep 0.2
   done
   return 1
@@ -464,17 +487,23 @@ cmd_stop(){
   # Stop every supervisor we own, not only the last PID written. Older builds
   # could misclassify a live supervisor and spawn another; leaving either one
   # alive keeps rewriting the shared template after the panel says Omdrop is off.
-  local p
-  while read -r p; do
-    [[ -n ${p:-} ]] && kill -TERM "$p" 2>/dev/null
-  done < <(supervisor_pids)
+  # omdrop-core's supervisor too: `start` leaves a window it opened alone and
+  # points here, so stop has to end it, or this returned 0 with core's window
+  # still up and the next start refused. Core's supervisor stops its own
+  # children on TERM, as ours does.
+  local p t
+  while read -r p t; do
+    signal_supervisor TERM "${p:-}" "${t:-}"
+  done < <(window_supervisors)
   # Return only once they are gone: a supervisor's teardown landing after
   # this stop would take down a window started right after it (the old fixed
-  # 1 s wait was shorter than the supervisor's 6 s interval sleep).
+  # 1 s wait was shorter than the supervisor's 6 s interval sleep). A KILLed
+  # supervisor cannot stop its children, so kill_children does, from the pids
+  # each recorded: core's lines carry start times and name exact processes.
   if ! wait_supervisors_gone; then
-    while read -r p; do
-      [[ -n ${p:-} ]] && kill -KILL "$p" 2>/dev/null
-    done < <(supervisor_pids)
+    while read -r p t; do
+      signal_supervisor KILL "${p:-}" "${t:-}"
+    done < <(window_supervisors)
     kill_children
     log "a supervisor ignored TERM for 10 s; killed it"
   fi
